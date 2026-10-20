@@ -73,6 +73,8 @@ main() {
     # function definitions instead of a file, and carry the OTB_* settings across.
     local vars=() v
     while IFS= read -r v; do vars+=("$v"); done < <(env | grep '^OTB_' || true)
+    # sudo drops SSH_CONNECTION; the installer uses it to keep this session's SSH port open.
+    [[ -n "${SSH_CONNECTION:-}" ]] && vars+=("OTB_SSH_CONNECTION=$SSH_CONNECTION")
     exec sudo env "${vars[@]}" bash -c "set -euo pipefail; umask 022; $(declare -f otb_bootstrap); otb_bootstrap \"\$@\"" otb-bootstrap "$@"
   fi
   otb_bootstrap "$@"

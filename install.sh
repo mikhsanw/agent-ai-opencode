@@ -11,8 +11,9 @@
 # Env (mode non-interaktif): OTB_TELEGRAM_BOT_TOKEN OTB_TELEGRAM_USER_ID OTB_PROVIDER
 #   OTB_MODEL OTB_API_KEY OTB_API_KEY_ENV (provider lain)  OTB_NODE_MIRROR
 # Aman dijalankan ulang: konfigurasi, user, dan workspace yang sudah ada tidak ditimpa.
-set -euo pipefail
+set -Eeuo pipefail
 umask 022
+trap 'printf "\033[1;31m[otb] GAGAL:\033[0m perintah tak terduga gagal (baris %s, exit %s): %s\n" "$LINENO" "$?" "$BASH_COMMAND" >&2' ERR
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Work from / so helpers running as unprivileged users never inherit an unreadable cwd.
@@ -686,17 +687,31 @@ notify_telegram() {
 }
 
 # --------------------------------------------------------------------------- host hardening (opt-in)
+# SSH ports to keep open. Several sources, because on Ubuntu 24.04 ssh is socket-activated:
+# `sshd -T` then fails until /run/sshd exists, and the real listener is ssh.socket.
+detect_ssh_ports() {
+  local ports=() p conn
+  install -d -m 0755 /run/sshd 2>/dev/null || true   # what ssh.service itself creates on start
+  while read -r p; do ports+=("$p"); done < <( (sshd -T 2>/dev/null || true) | awk '/^port /{print $2}')
+  while read -r p; do ports+=("$p"); done < <( (systemctl show ssh.socket -p Listen --value 2>/dev/null || true) \
+    | grep -oE ':[0-9]+ ' | tr -d ': ')
+  # The port this very session came in on: never lock out the person running the installer.
+  conn="${OTB_SSH_CONNECTION:-${SSH_CONNECTION:-}}"
+  [[ -n "$conn" ]] && ports+=("$(awk '{print $4}' <<<"$conn")")
+  [[ ${#ports[@]} -gt 0 ]] || ports=(22)
+  printf '%s\n' "${ports[@]}" | grep -E '^[0-9]+$' | sort -un | tr '\n' ' '
+}
+
 harden_host() {
-  local ssh_port has_keys=0 f
-  ssh_port="$(sshd -T 2>/dev/null | awk '/^port /{print $2; exit}')"
-  ssh_port="${ssh_port:-22}"
+  local ssh_ports has_keys=0 f p
+  ssh_ports="$(detect_ssh_ports)"
   [[ -s /root/.ssh/authorized_keys ]] && has_keys=1
   for f in /home/*/.ssh/authorized_keys; do [[ -s "$f" ]] && has_keys=1; done
 
   cat >&2 <<EOF
 
 Rencana hardening host:
-  1. ufw: tolak semua koneksi masuk, izinkan keluar, rate-limit SSH port $ssh_port/tcp.
+  1. ufw: tolak semua koneksi masuk, izinkan keluar, rate-limit SSH port: ${ssh_ports% }.
   2. SSH: matikan login password; root hanya boleh login dengan key.
      $( [[ $has_keys -eq 1 ]] && echo "(authorized_keys ditemukan -> akan diterapkan)" || echo "(TIDAK ada authorized_keys -> DILEWATI agar Anda tidak terkunci)")
   Biarkan sesi SSH ini tetap terbuka sampai login baru berhasil diuji.
@@ -707,24 +722,27 @@ EOF
   apt_install ufw
   ufw default deny incoming >/dev/null
   ufw default allow outgoing >/dev/null
-  ufw limit "$ssh_port/tcp" >/dev/null
+  for p in $ssh_ports; do ufw limit "$p/tcp" >/dev/null; done
   ufw --force enable >/dev/null
-  ok "ufw aktif (SSH port $ssh_port diizinkan)"
+  ok "ufw aktif (SSH port ${ssh_ports% } diizinkan)"
   if [[ $has_keys -eq 1 ]]; then
     install -d -m 0755 /etc/ssh/sshd_config.d
+    # 10- sorts before cloud images' 50-cloud-init.conf; sshd uses the first value it reads.
     cat > /etc/ssh/sshd_config.d/10-otb-hardening.conf <<'EOF'
 PasswordAuthentication no
 KbdInteractiveAuthentication no
 PermitRootLogin prohibit-password
 EOF
     if sshd -t 2>/dev/null; then
-      systemctl reload ssh 2>/dev/null || systemctl reload sshd
+      # Socket-activated ssh reads the config on every new connection; reload if a daemon runs.
+      systemctl reload ssh 2>/dev/null || systemctl reload sshd 2>/dev/null || true
       ok "SSH hanya menerima key. Uji login baru sebelum menutup sesi ini."
     else
       rm -f /etc/ssh/sshd_config.d/10-otb-hardening.conf
       warn "Tes konfigurasi sshd gagal; perubahan SSH dibatalkan."
     fi
   fi
+  return 0
 }
 
 save_install_conf() {
