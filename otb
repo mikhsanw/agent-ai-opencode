@@ -93,7 +93,11 @@ cmd_update() {
   git -C "$REPO_DIR" rev-parse --git-dir >/dev/null 2>&1 || die "$REPO_DIR bukan repo git; update manual."
   git -C "$REPO_DIR" fetch --tags --force --quiet origin
   [[ -n "$target" ]] || target="$(git -C "$REPO_DIR" tag --list 'v*' --sort=-v:refname | head -n1)"
-  [[ -n "$target" ]] || die "Tidak ada tag rilis di remote."
+  if [[ -z "$target" ]]; then
+    git -C "$REPO_DIR" fetch --quiet origin main
+    target=origin/main
+    log "Belum ada rilis bertag; memakai branch main."
+  fi
   current="$(git -C "$REPO_DIR" describe --tags --always)"
   if [[ "$(git -C "$REPO_DIR" rev-parse HEAD)" == "$(git -C "$REPO_DIR" rev-parse "$target^{commit}")" ]]; then
     log "Sudah di $target."; return 0

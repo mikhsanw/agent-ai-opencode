@@ -13,16 +13,24 @@ Kode bot upstream **tidak diubah sama sekali**. Semua pengamanan dilakukan lewat
 
 ## Pasang cepat
 
-Di VPS **khusus** untuk bot ini (Ubuntu 24.04 atau Debian 12), login sebagai user dengan sudo, lalu:
+Di VPS **khusus** untuk bot ini (Ubuntu 24.04 atau Debian 12), sebagai root atau user dengan sudo:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/mikhsanw/agent-ai-opencode/v0.1.0/bootstrap.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/mikhsanw/agent-ai-opencode/main/bootstrap.sh | bash
 ```
+
+Setelah GitHub Pages diaktifkan (lihat bagian maintainer), URL pendeknya:
+
+```bash
+curl -fsSL https://mikhsanw.github.io/agent-ai-opencode/install.sh | bash
+```
+
+Skrip ini meminta `sudo` sendiri bila perlu, lalu memasang **rilis bertag terbaru** (atau `main` jika belum ada rilis). Untuk mengunci versi tertentu: `curl ... | OTB_REF=v0.1.0 bash`.
 
 Siapkan dulu:
 - **Token bot** dari [@BotFather](https://t.me/BotFather) (`/newbot`).
 - **User ID Telegram** Anda, dari [@userinfobot](https://t.me/userinfobot).
-- **API key** provider LLM (Gemini, Claude, OpenAI, OpenRouter, atau lainnya). Pasang batas pengeluaran di dashboard provider.
+- **API key**. Paling praktis memakai **OpenCode Zen** dari https://opencode.ai/auth: satu key untuk banyak model (Claude, GPT, Gemini, DeepSeek, Kimi, GLM, dan lain-lain). Buat key khusus untuk VPS ini, dan pasang batas pemakaian di dashboard. Key dari provider lain (Gemini, Anthropic, OpenAI, DeepSeek, dan sebagainya) juga bisa dipakai.
 
 Wizard akan menanyakan hal-hal berikut:
 
@@ -30,22 +38,26 @@ Wizard akan menanyakan hal-hal berikut:
 Mode [1]                      systemd (disarankan) atau docker
 Token bot                     input disembunyikan, langsung dicek ke Telegram
 User ID                       hanya akun ini yang bisa memakai bot
-Provider [1] / ID model       default: Google Gemini, gemini-2.5-pro
-API key                       input disembunyikan
+Provider                      daftar dari katalog OpenCode; default OpenCode Zen; bisa cari 230+ provider
+API key                       nama env variable terisi otomatis; input disembunyikan
+Model                         daftar bernomor dari katalog, model gratis diberi tanda [gratis]
 Pasang firewall? (y/n)        ufw + SSH key-only, rencananya ditampilkan dulu
 ```
 
+Di setiap daftar, Anda bisa mengetik nomor, ID persis, atau kata kunci untuk menyaring (misalnya `claude`, `gemini`, `free`). ID yang belum ada di katalog tetap bisa dipakai setelah konfirmasi.
+
 Installer lalu memasang semua dependensi, menjalankan layanan, menjalankan uji keamanan (`verify.sh`), dan mengirim pesan **"✅ Bot OpenCode aktif"** ke Telegram Anda. Jika pesan tidak masuk, buka bot Anda di Telegram, tekan **Start**, lalu kirim `/start`.
 
-Untuk memakai Docker: `curl ... | sudo bash -s -- --mode docker`
+Untuk memakai Docker: `curl ... | bash -s -- --mode docker`
 
 ### Cara yang lebih hati-hati
 
-`curl | sudo bash` menjalankan kode dari internet sebagai root tanpa Anda baca. URL di atas sudah di-pin ke tag rilis `v0.1.0`, jadi isinya tidak berubah diam-diam. Jika ingin membaca kodenya dulu:
+`curl | bash` menjalankan kode dari internet sebagai root tanpa Anda baca. Jika ingin membaca kodenya dulu:
 
 ```bash
-git clone --branch v0.1.0 https://github.com/mikhsanw/agent-ai-opencode.git
+git clone https://github.com/mikhsanw/agent-ai-opencode.git
 cd agent-ai-opencode
+git checkout v0.1.0                   # atau rilis lain; lihat: git tag
 less bootstrap.sh install.sh          # baca dulu
 sudo ./install.sh
 ```
@@ -180,18 +192,18 @@ Mengizinkan `npm test` atau `php artisan test` secara otomatis **sama saja denga
 Untuk cloud-init atau skrip provisioning, semua jawaban bisa diberikan lewat environment variable:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/mikhsanw/agent-ai-opencode/v0.1.0/bootstrap.sh \
+curl -fsSL https://raw.githubusercontent.com/mikhsanw/agent-ai-opencode/main/bootstrap.sh \
   | sudo OTB_TELEGRAM_BOT_TOKEN=... OTB_TELEGRAM_USER_ID=... \
-         OTB_PROVIDER=google OTB_API_KEY=... bash -s -- --non-interactive --no-harden-host
+         OTB_API_KEY=... bash -s -- --non-interactive --no-harden-host
 ```
 
 | Variable | Isi |
 |---|---|
 | `OTB_TELEGRAM_BOT_TOKEN`, `OTB_TELEGRAM_USER_ID` | Wajib |
-| `OTB_PROVIDER` | `google`, `anthropic`, `openai`, `openrouter`, atau ID provider OpenCode lain |
-| `OTB_MODEL` | Opsional; default sesuai provider |
+| `OTB_PROVIDER` | Opsional; default `opencode` (OpenCode Zen). Bisa ID provider OpenCode apa pun, mis. `google`, `deepseek` |
+| `OTB_MODEL` | Opsional; default model bawaan provider di katalog OpenCode |
 | `OTB_API_KEY` | Wajib |
-| `OTB_API_KEY_ENV` | Nama env API key, hanya untuk provider di luar empat di atas |
+| `OTB_API_KEY_ENV` | Opsional; nama env API key (otomatis dari katalog OpenCode) |
 | `OTB_NODE_MIRROR` | Opsional; mirror Node.js |
 | `OTB_REF`, `OTB_REPO_URL` | Opsional; tag atau repo lain (misalnya fork Anda) |
 
@@ -202,8 +214,10 @@ Opsi lain untuk `install.sh`: `--mode docker`, `--harden-host`, `--no-harden-hos
 ## Struktur
 
 ```
-bootstrap.sh                   pemasang satu-perintah (clone tag ke /opt/otb/src -> install.sh)
+bootstrap.sh                   pemasang satu-perintah (clone rilis ke /opt/otb/src -> install.sh)
+docs/install.sh                salinan bootstrap.sh untuk GitHub Pages (URL pendek)
 install.sh                     wizard + instalasi (idempoten, aman dijalankan ulang)
+lib/catalog.mjs                membaca katalog provider/model dari OpenCode untuk wizard
 otb                            perintah pengelolaan (terpasang di /usr/local/bin/otb)
 verify.sh                      uji keamanan untuk kedua mode
 config/opencode-managed.json   kebijakan izin OpenCode (tidak bisa ditimpa repo)
@@ -215,19 +229,31 @@ docker/ + docker-compose.yml   mode Docker
 
 Lokasi di VPS: konfigurasi dan secret di `/etc/otb/` (0600 root), proyek di `/srv/workspace/`, kode installer di `/opt/otb/src/`.
 
-## Upgrade versi bot atau OpenCode (untuk maintainer)
+## Untuk maintainer
 
-1. Ubah versi di `deploy/agent/package.json` atau `deploy/bot/package.json`.
-2. Jalankan `npm install --package-lock-only` di folder itu untuk memperbarui lockfile.
-3. Cek changelog dan advisory keamanan untuk versi baru tersebut.
-4. Commit, buat tag rilis baru (misalnya `v0.1.1`), lalu push tag-nya. Ubah juga tag default di `bootstrap.sh` dan README.
-5. Di VPS: `otb update`.
+### URL pendek (GitHub Pages)
+
+Settings → Pages → Source: **Deploy from a branch**, Branch: `main`, folder `/docs`. Setelah aktif, `https://mikhsanw.github.io/agent-ai-opencode/install.sh` berfungsi. `docs/install.sh` harus selalu identik dengan `bootstrap.sh`:
+
+```bash
+cp bootstrap.sh docs/install.sh
+```
+
+### Rilis
+
+Installer memasang **tag `v*` terbaru**, dan `otb update` mengikuti tag yang sama. Tanpa tag, keduanya memakai `main`. Untuk merilis:
+
+1. (Opsional) Ubah versi di `deploy/agent/package.json` atau `deploy/bot/package.json`, jalankan `npm install --package-lock-only` di folder itu, lalu cek changelog dan advisory keamanan versi baru tersebut.
+2. Commit ke `main`.
+3. Buat tag, misalnya `git tag v0.1.1 && git push origin v0.1.1`, atau lewat halaman Releases di GitHub.
+4. Di VPS: `otb update`.
 
 ## Batasan pengujian
 
 Rilis ini diuji di VM Ubuntu 24.04 dengan systemd, mulai dari kondisi **tanpa Node.js**:
-- one-liner `bootstrap.sh` dari GitHub;
-- wizard interaktif lewat terminal sungguhan;
+- one-liner `bootstrap.sh` dari GitHub, sebagai root maupun sebagai user biasa yang diminta password sudo;
+- tanpa tag rilis (otomatis memakai `main`);
+- wizard interaktif lewat terminal sungguhan, termasuk daftar provider dan model dari katalog OpenCode;
 - mode non-interaktif;
 - menjalankan ulang (tidak ada pertanyaan ulang);
 - checksum Node.js yang dimanipulasi (instalasi dibatalkan);

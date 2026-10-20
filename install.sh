@@ -15,6 +15,8 @@ set -euo pipefail
 umask 022
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Work from / so helpers running as unprivileged users never inherit an unreadable cwd.
+cd /
 MODE=""
 HARDEN_HOST=""        # "", 1, 0
 ASSUME_YES=0
@@ -71,7 +73,7 @@ env_value() { # env_value <file> <KEY>  -> value, empty if unset or commented ou
 
 set_env() { # set_env <file> <KEY> <VALUE>  -> replaces KEY= or "# KEY=", else appends
   local f="$1" k="$2" v="$3" tmp
-  [[ "$v" =~ ^[A-Za-z0-9_.:/@+=,-]*$ ]] || die "Nilai untuk $k mengandung karakter yang tidak didukung."
+  [[ "$v" =~ ^[A-Za-z0-9_.:/@+=,~-]*$ ]] || die "Nilai untuk $k mengandung karakter yang tidak didukung."
   tmp="$(mktemp "$f.XXXXXX")"
   awk -v k="$k" -v v="$v" '
     BEGIN { done = 0 }
@@ -123,6 +125,8 @@ provider_key_env() {
     anthropic) echo ANTHROPIC_API_KEY ;;
     openai) echo OPENAI_API_KEY ;;
     openrouter) echo OPENROUTER_API_KEY ;;
+    opencode|opencode-go) echo OPENCODE_API_KEY ;;
+    deepseek) echo DEEPSEEK_API_KEY ;;
     *) echo "" ;;
   esac
 }
@@ -132,6 +136,8 @@ provider_default_model() {
     anthropic) echo claude-sonnet-4-5 ;;
     openai) echo gpt-5 ;;
     openrouter) echo anthropic/claude-sonnet-4.5 ;;
+    opencode) echo big-pickle ;;
+    deepseek) echo deepseek-v4-pro ;;
     *) echo "" ;;
   esac
 }
@@ -358,55 +364,175 @@ configure_telegram() {
   set_env "$bot" TELEGRAM_ALLOWED_USER_ID "$uid"
 }
 
+# Interactive picker over tab-separated rows. Prints the chosen first column.
+# pick_from <title> <rows> <default-id> <label-fn>
+#   Accepts a number, an exact ID, or a keyword that filters the list.
+pick_from() {
+  local title="$1" rows="$2" default_id="$3" fmt="$4" filter="" input shown ids=() i=0 line id def_n=""
+  while :; do
+    ids=(); i=0; def_n=""
+    local view="$rows"
+    [[ -n "$filter" ]] && view="$(grep -iF -- "$filter" <<<"$rows" || true)"
+    if [[ -z "$view" ]]; then
+      printf '  Tidak ada yang cocok dengan "%s".\n' "$filter" >/dev/tty; filter=""; continue
+    fi
+    shown=0
+    printf '%s\n' "$title" >/dev/tty
+    while IFS= read -r line; do
+      [[ -z "$line" ]] && continue
+      id="${line%%$'\t'*}"; i=$((i+1)); ids+=("$id")
+      [[ "$id" == "$default_id" ]] && def_n="$i"
+      if (( shown < 30 )); then printf '  %3d) %s\n' "$i" "$("$fmt" "$line")" >/dev/tty; shown=$((shown+1)); fi
+    done <<<"$view"
+    (( i > shown )) && printf '       … %d lainnya. Ketik kata kunci untuk menyaring.\n' $((i - shown)) >/dev/tty
+    input="$(ask "  Pilih nomor, ID, atau kata kunci" "${def_n:-}")"
+    if [[ "$input" =~ ^[0-9]+$ ]] && (( input >= 1 && input <= i )); then
+      printf '%s' "${ids[$((input-1))]}"; return 0
+    fi
+    for id in "${ids[@]}"; do [[ "$id" == "$input" ]] && { printf '%s' "$id"; return 0; }; done
+    if [[ -n "$input" ]] && awk -F'\t' -v x="$input" '$1 == x { f = 1 } END { exit !f }' <<<"$rows"; then
+      printf '%s' "$input"; return 0
+    fi
+    # Not in the list and matches nothing: the catalog may lag behind new models.
+    if [[ -n "$input" && "$input" =~ ^[A-Za-z0-9_.:/@~-]+$ ]] && ! grep -qiF -- "$input" <<<"$rows"; then
+      if [[ "$(ask "  \"$input\" tidak ada di daftar. Pakai apa adanya? (y/n)" n)" =~ ^[YyJj] ]]; then
+        printf '%s' "$input"; return 0
+      fi
+      continue
+    fi
+    filter="$input"
+  done
+}
+
+fmt_provider() { local id name _env n free; IFS=$'\t' read -r id name _env n free <<<"$1"
+  if [[ "$id" == opencode ]]; then printf '%-22s %s' "$id" "OpenCode Zen: satu key untuk Claude, GPT, Gemini, DeepSeek, dll."; return; fi
+  printf '%-22s %s (%s model%s)' "$id" "$name" "$n" "$( ((free > 0)) && printf ', %s gratis' "$free")"; }
+fmt_model() { local id name free def; IFS=$'\t' read -r id name free def <<<"$1"
+  printf '%-34s %s%s%s' "$id" "$name" "$( ((free)) && printf ' [gratis]')" "$( ((def)) && printf ' (default)')"; }
+
+# Runs lib/catalog.mjs against the installed OpenCode. Exported provider keys are passed
+# through so OpenCode can also list models that need a key (e.g. paid Zen models).
+catalog() { # catalog providers | models <provider>   (retries: OpenCode startup is occasionally slow)
+  local attempt out
+  for attempt in 1 2 3; do
+    out="$(catalog_once "$@" || true)"
+    [[ -n "$out" ]] && { printf '%s\n' "$out"; return 0; }
+    [[ $attempt -lt 3 && $INTERACTIVE -eq 1 ]] && printf '  …mencoba lagi\n' >/dev/tty
+  done
+  return 1
+}
+
+catalog_once() {
+  local key_env="${CATALOG_KEY_ENV:-}"
+  export OTB_CATALOG_TIMEOUT_MS="${OTB_CATALOG_TIMEOUT_MS:-30000}"
+  if [[ "$MODE" == "systemd" ]]; then
+    # cd: the caller's working directory (e.g. a home dir) may be unreadable for otb-build.
+    (cd / && runuser -u otb-build -- env ${key_env:+"$key_env"="${!key_env:-}"} \
+      node "$OPT_DIR/catalog.mjs" "$OPT_DIR/agent/node_modules/.bin/opencode" "$@" 2>/dev/null)
+  else
+    docker run --rm ${key_env:+-e "$key_env"} -e OTB_CATALOG_TIMEOUT_MS -v "$OPT_DIR/catalog.mjs:/catalog.mjs:ro" \
+      --entrypoint node otb-agent:local /catalog.mjs /opt/otb/agent/node_modules/.bin/opencode "$@" 2>/dev/null
+  fi
+}
+
+install_catalog_helper() {
+  install -d -m 0755 -o root -g root "$OPT_DIR"
+  install -m 0644 -o root -g root "$REPO_DIR/lib/catalog.mjs" "$OPT_DIR/catalog.mjs"
+}
+
 configure_model() {
   local bot="$ETC_DIR/bot.env" agent="$ETC_DIR/agent.env"
-  local provider model key_env key choice
-  provider="$(env_value "$bot" OPENCODE_MODEL_PROVIDER)"
-  model="$(env_value "$bot" OPENCODE_MODEL_ID)"
-  [[ -n "${OTB_PROVIDER:-}" ]] && provider="$OTB_PROVIDER"
-  [[ -n "${OTB_MODEL:-}" ]] && model="$OTB_MODEL"
+  local provider model key_env key cur_provider providers="" models="" envs pick
+  cur_provider="$(env_value "$bot" OPENCODE_MODEL_PROVIDER)"
+  provider="${OTB_PROVIDER:-$cur_provider}"
+  model="${OTB_MODEL:-$(env_value "$bot" OPENCODE_MODEL_ID)}"
+  local ask_all=0
+  [[ $INTERACTIVE -eq 1 && ( -z "$provider" || -z "$model" || $RECONFIGURE -eq 1 ) ]] && ask_all=1
+  [[ -z "${OTB_PROVIDER:-}" && $ask_all -eq 0 && -z "$provider" ]] && provider=opencode
 
-  if [[ -z "$provider" || -z "$model" || $RECONFIGURE -eq 1 ]] && [[ $INTERACTIVE -eq 1 ]]; then
-    cat >/dev/tty <<'EOF'
-
-Model AI
-  1) Google Gemini   2) Anthropic Claude   3) OpenAI   4) OpenRouter   5) Lainnya
-EOF
-    local def=1
-    case "$provider" in anthropic) def=2 ;; openai) def=3 ;; openrouter) def=4 ;; google|"") def=1 ;; *) def=5 ;; esac
-    choice="$(ask "  Provider" "$def")"
-    case "$choice" in
-      1) provider=google ;; 2) provider=anthropic ;; 3) provider=openai ;; 4) provider=openrouter ;;
-      *) provider="$(ask "  ID provider OpenCode (mis. groq, mistral)" "$provider")" ;;
-    esac
-    local dm; dm="$(provider_default_model "$provider")"
-    [[ -n "$model" && "$(env_value "$bot" OPENCODE_MODEL_PROVIDER)" == "$provider" ]] && dm="$model"
-    model="$(ask "  ID model" "$dm")"
+  install_catalog_helper
+  if [[ $ask_all -eq 1 ]]; then
+    printf '\n\033[1mModel AI\033[0m\n  Membaca katalog provider dari OpenCode…\n' >/dev/tty
+    providers="$(catalog providers || true)"
+    local quick="" q
+    for q in opencode google anthropic openai openrouter deepseek groq mistral xai; do
+      quick+="$(awk -F'\t' -v x="$q" '$1 == x { print; exit }' <<<"$providers")"$'\n'
+    done
+    quick="$(sed '/^$/d' <<<"$quick")"
+    if [[ -n "$providers" ]]; then
+      printf '  OpenCode Zen (opencode) = satu API key dari opencode.ai/auth untuk banyak model.\n' >/dev/tty
+      quick+=$'\n'"cari"$'\t'"Cari provider lain ($(wc -l <<<"$providers") tersedia)"$'\t\t0\t0'
+      pick="$(pick_from "  Provider:" "$quick" "${provider:-opencode}" fmt_provider_menu)"
+      if [[ "$pick" == "cari" ]]; then
+        pick="$(pick_from "  Semua provider (ketik kata kunci, mis. deep, kimi, zai):" "$providers" "" fmt_provider)"
+      fi
+      provider="$pick"
+    else
+      printf '  Katalog tidak bisa dibaca; isi manual.\n' >/dev/tty
+      provider="$(ask "  ID provider OpenCode" "${provider:-opencode}")"
+    fi
   fi
-  [[ -z "$model" && -n "$provider" ]] && model="$(provider_default_model "$provider")"
-  [[ -n "$provider" && -n "$model" ]] || die "Provider/model belum diisi (OTB_PROVIDER, OTB_MODEL)."
+  [[ -n "$provider" ]] || die "Provider belum diisi (OTB_PROVIDER)."
 
-  key_env="$(provider_key_env "$provider")"
-  [[ -n "$key_env" ]] || key_env="${OTB_API_KEY_ENV:-}"
+  # Which env variable holds the key: catalog first, then built-in map, then ask.
+  if [[ -z "$providers" && -z "${OTB_API_KEY_ENV:-}" && -z "$(provider_key_env "$provider")" ]]; then
+    providers="$(catalog providers || true)"
+  fi
+  envs="$(awk -F'\t' -v p="$provider" '$1 == p { print $3 }' <<<"$providers")"
+  key_env="${OTB_API_KEY_ENV:-}"
+  if [[ -z "$key_env" && -n "$envs" ]]; then
+    key_env="$(tr ',' '\n' <<<"$envs" | grep -m1 '_API_KEY$' || true)"
+    [[ -n "$key_env" ]] || key_env="${envs%%,*}"
+  fi
+  [[ -n "$key_env" ]] || key_env="$(provider_key_env "$provider")"
   if [[ -z "$key_env" && $INTERACTIVE -eq 1 ]]; then
-    key_env="$(ask "  Nama env variable API key untuk $provider (mis. GROQ_API_KEY)" "")"
+    key_env="$(ask "  Nama env variable API key untuk $provider" "")"
   fi
-  [[ "$key_env" =~ ^[A-Z][A-Z0-9_]*$ ]] || die "Nama env API key tidak valid (OTB_API_KEY_ENV)."
+  [[ "$key_env" =~ ^[A-Z][A-Z0-9_]*$ ]] || die "Nama env API key untuk $provider tidak diketahui (set OTB_API_KEY_ENV)."
+  if [[ "$envs" == *,* && "$envs" != *_API_KEY* ]]; then
+    warn "Provider $provider butuh beberapa variable ($envs). Lengkapi manual di $agent lalu jalankan: otb restart"
+  fi
 
-  key="$(env_value "$agent" "$key_env")"
-  [[ -n "${OTB_API_KEY:-}" ]] && key="$OTB_API_KEY"
-  if [[ -z "$key" || $RECONFIGURE -eq 1 ]] && [[ $INTERACTIVE -eq 1 ]]; then
-    printf '  Tips: pasang batas pengeluaran (spending limit) di dashboard provider.\n' >/dev/tty
+  key="${OTB_API_KEY:-$(env_value "$agent" "$key_env")}"
+  if [[ $INTERACTIVE -eq 1 && ( -z "$key" || $ask_all -eq 1 ) ]]; then
+    [[ "$provider" == opencode* ]] && printf '  Buat key di https://opencode.ai/auth (gunakan key terpisah khusus VPS ini).\n' >/dev/tty
+    printf '  Tips: pasang batas pengeluaran di dashboard provider.\n' >/dev/tty
     [[ -n "$key" ]] && printf '  API key saat ini: %s (Enter untuk tetap)\n' "$(mask "$key")" >/dev/tty
     local input; input="$(ask_secret "  API key ($key_env)")"
     [[ -n "$input" ]] && key="$input"
   fi
   [[ -n "$key" ]] || die "API key belum diisi (OTB_API_KEY)."
 
+  if [[ $ask_all -eq 1 || -z "$model" ]]; then
+    [[ $ask_all -eq 1 ]] && printf '  Membaca daftar model %s…\n' "$provider" >/dev/tty
+    models="$(export "$key_env=$key"; CATALOG_KEY_ENV="$key_env" catalog models "$provider" || true)"
+    [[ -n "$models" ]] || models="$(catalog models "$provider" || true)"
+  fi
+  if [[ $ask_all -eq 1 ]]; then
+    local def_model; def_model="$(awk -F'\t' '$4 == 1 { print $1; exit }' <<<"$models")"
+    [[ "$cur_provider" == "$provider" && -n "$model" ]] && def_model="$model"
+    if [[ -n "$models" ]]; then
+      model="$(pick_from "  Model $provider:" "$models" "$def_model" fmt_model)"
+      if awk -F'\t' -v m="$model" '$1 == m && $3 == 1 { f = 1 } END { exit !f }' <<<"$models"; then
+        printf '  \033[33mCatatan:\033[0m sebagian model gratis memakai data Anda untuk training.\n  Cek https://opencode.ai/docs/zen sebelum dipakai untuk repo sensitif.\n' >/dev/tty
+      fi
+    else
+      model="$(ask "  ID model" "${def_model:-$(provider_default_model "$provider")}")"
+    fi
+  elif [[ -z "$model" ]]; then
+    model="$(awk -F'\t' '$4 == 1 { print $1; exit }' <<<"$models")"
+    [[ -n "$model" ]] || model="$(provider_default_model "$provider")"
+  fi
+  [[ -n "$model" ]] || die "Model belum diisi (OTB_MODEL)."
+
   set_env "$bot" OPENCODE_MODEL_PROVIDER "$provider"
   set_env "$bot" OPENCODE_MODEL_ID "$model"
   set_env "$agent" "$key_env" "$key"
+  log "Model: $provider/$model"
 }
+
+fmt_provider_menu() { local id name _rest; IFS=$'\t' read -r id name _rest <<<"$1"
+  if [[ "$id" == cari ]]; then printf '%s' "$name"; else fmt_provider "$1"; fi; }
 
 choose_harden_host() {
   [[ -n "$HARDEN_HOST" ]] && return 0
@@ -602,6 +728,8 @@ EOF
 }
 
 save_install_conf() {
+  # Code under /opt/otb is run by root later (otb, update): keep it root-only writable.
+  if [[ "$REPO_DIR" == /opt/otb/* ]]; then chown -R root:root "$REPO_DIR"; chmod -R go-w "$REPO_DIR"; fi
   printf 'MODE=%s\nREPO_DIR=%s\nHARDEN_ASKED=1\n' "$MODE" "$REPO_DIR" > "$INSTALL_CONF"
   chmod 0644 "$INSTALL_CONF"
   ln -sfn "$REPO_DIR/otb" /usr/local/bin/otb
@@ -615,9 +743,9 @@ main() {
   install_dependencies
   install_shared_config
   configure_telegram
+  if [[ "$MODE" == "systemd" ]]; then install_systemd_mode; else install_docker_mode; fi
   configure_model
   choose_harden_host
-  if [[ "$MODE" == "systemd" ]]; then install_systemd_mode; else install_docker_mode; fi
   save_install_conf
   [[ "$HARDEN_HOST" == 1 ]] && harden_host
 
