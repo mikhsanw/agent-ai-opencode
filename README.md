@@ -41,7 +41,9 @@ User ID                       hanya akun ini yang bisa memakai bot
 Provider                      daftar dari katalog OpenCode; default OpenCode Zen; bisa cari 230+ provider
 API key                       nama env variable terisi otomatis; input disembunyikan
 Model                         daftar bernomor dari katalog, model gratis diberi tanda [gratis]
+Folder di luar workspace      opsional, mis. /home/ubuntu/web-sekolah (baca saja / baca-tulis)
 Persetujuan                   otomatis (default) / seimbang / ketat
+Repo untuk workspace          opsional, langsung di-clone ke /srv/workspace
 Pasang firewall? (y/n)        ufw + SSH key-only, rencananya ditampilkan dulu
 ```
 
@@ -89,6 +91,7 @@ otb attach
 | `otb clone <url> [nama]` | Clone repo ke `/srv/workspace` sebagai user agen |
 | `otb attach` | Buka TUI OpenCode yang terhubung ke agen (sesi yang sama dengan di Telegram) |
 | `otb policy [nama]` | Lihat atau ganti preset persetujuan: `otomatis`, `seimbang`, `ketat`, `custom` |
+| `otb shares` / `otb share <path> [--write]` / `otb unshare <path>` | Folder di luar workspace yang boleh diakses agen |
 | `otb github-key [test\|off]` | Beri agen akses `git push` ke GitHub (setiap push tetap ditanya; force push diblokir) |
 | `otb verify` | Jalankan uji keamanan |
 | `otb restart` | Restart bot dan agen |
@@ -171,6 +174,35 @@ otb clone https://github.com/<anda>/<repo>.git
 ```
 
 Lalu pilih proyeknya di Telegram dengan `/projects`. Untuk repo privat, gunakan **deploy key read-only** (bukan SSH key akun GitHub Anda). Pada mode systemd, taruh di `/var/lib/otb-agent/.ssh/`.
+
+### Folder di luar workspace (mis. website produksi)
+
+Secara default agen hanya bisa bekerja di `/srv/workspace`. Folder lain bisa dibagikan saat instalasi (wizard menanyakannya) atau kapan saja:
+
+```bash
+otb share /home/ubuntu/web-sekolah            # baca saja
+otb share /home/ubuntu/web-sekolah --write    # baca-tulis, termasuk .env dan database
+otb shares                                    # daftar
+otb unshare /home/ubuntu/web-sekolah          # cabut
+```
+
+Lalu buka di Telegram dengan `/open`. Hanya untuk mode systemd.
+
+| | baca saja | `--write` |
+|---|---|---|
+| Baca kode | ✓ | ✓ |
+| Ubah kode, `composer`, `php artisan`, `git commit` di folder itu | ✗ | ✓ |
+| Baca/edit `.env` | ✗ | ✓, setelah disetujui lewat Telegram (tool baca/edit OpenCode) |
+| Database | ✗ | ✓, memakai kredensial dari `.env` |
+
+Cara kerjanya:
+- Folder itu muncul di sandbox pada **path aslinya**; isi lain dari `/home` (termasuk `.ssh`) tetap tersembunyi. `verify.sh` mengujinya.
+- Akses diberikan lewat **ACL**, sehingga pemilik file dan izin website tidak diubah. File yang dibuat agen tetap bisa dibaca website dan diedit pemilik folder.
+- Untuk aplikasi Laravel, user PHP-FPM (mis. `www-data`) diberi akses tulis di `storage/` dan `bootstrap/cache/`, supaya website tidak error setelah agen menjalankan `php artisan`.
+- `otb unshare` dan `otb uninstall` mencabut ACL dan mengembalikan kepemilikan file buatan agen ke pemilik folder.
+- Folder sistem, seluruh home (`/home/ubuntu`), dan folder yang berisi `.ssh` tidak bisa dibagikan.
+
+> ⚠️ **Dengan `--write`, agen bekerja langsung di website yang sedang berjalan.** Isi `.env` dan data database (mis. data siswa) bisa terkirim ke penyedia model AI dan tampil di Telegram; gunakan model yang tidak memakai data untuk training. Di preset otomatis, edit file dan `php artisan migrate` berjalan tanpa ditanya (yang ditanya: `rm`, `migrate:fresh/rollback/db:wipe/db:seed`, `mysql`, dll.). Pastikan folder itu repo git (agar perubahan bisa dilihat dan dibatalkan) dan database punya backup rutin. Cara yang lebih aman: kerjakan perubahan di salinan (`otb clone`) lalu deploy sendiri.
 
 ### Mengizinkan agen `git push` (opsional)
 
@@ -257,6 +289,8 @@ curl -fsSL https://raw.githubusercontent.com/mikhsanw/agent-ai-opencode/main/boo
 | `OTB_API_KEY` | Wajib |
 | `OTB_API_KEY_ENV` | Opsional; nama env API key (otomatis dari katalog OpenCode) |
 | `OTB_POLICY` | Opsional; `otomatis` (default), `seimbang`, `ketat`, `custom` |
+| `OTB_SHARES` | Opsional; mis. `rw:/home/ubuntu/web-sekolah ro:/var/www/lain` |
+| `OTB_CLONE` | Opsional; URL repo dipisah spasi, langsung di-clone ke workspace |
 | `OTB_NODE_MIRROR` | Opsional; mirror Node.js |
 | `OTB_REF`, `OTB_REPO_URL` | Opsional; tag atau repo lain (misalnya fork Anda) |
 
@@ -271,6 +305,7 @@ bootstrap.sh                   pemasang satu-perintah (clone rilis ke /opt/otb/s
 docs/install.sh                salinan bootstrap.sh untuk GitHub Pages (URL pendek)
 install.sh                     wizard + instalasi (idempoten, aman dijalankan ulang)
 lib/catalog.mjs                membaca katalog provider/model dari OpenCode untuk wizard
+lib/shares.sh                  berbagi folder di luar workspace (ACL + drop-in systemd)
 otb                            perintah pengelolaan (terpasang di /usr/local/bin/otb)
 verify.sh                      uji keamanan untuk kedua mode
 config/policies/*.json         preset persetujuan (otomatis, seimbang, ketat, dan varian -push); dipasang sebagai managed config OpenCode

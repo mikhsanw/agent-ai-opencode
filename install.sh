@@ -10,6 +10,7 @@
 # Opsi lain: --no-harden-host  --skip-telegram-check  --no-deps  --yes
 # Env (mode non-interaktif): OTB_TELEGRAM_BOT_TOKEN OTB_TELEGRAM_USER_ID OTB_PROVIDER
 #   OTB_MODEL OTB_API_KEY OTB_API_KEY_ENV (provider lain)  OTB_POLICY  OTB_NODE_MIRROR
+#   OTB_CLONE="url ..."  OTB_SHARES="rw:/path ro:/path"
 # Aman dijalankan ulang: konfigurasi, user, dan workspace yang sudah ada tidak ditimpa.
 set -Eeuo pipefail
 umask 022
@@ -66,6 +67,8 @@ if [[ $INTERACTIVE -eq 1 ]] && ! { : </dev/tty; } 2>/dev/null; then
 fi
 
 # --------------------------------------------------------------------------- helpers
+# shellcheck source=lib/shares.sh
+source "$REPO_DIR/lib/shares.sh"
 random_secret() { od -An -tx1 -N24 /dev/urandom | tr -d ' \n'; }
 
 env_value() { # env_value <file> <KEY>  -> value, empty if unset or commented out
@@ -281,6 +284,9 @@ write_agent_gitconfig() {
     printf '[push]\n\tdefault = %s\n' "$push_default"
     printf '[core]\n\thooksPath = /dev/null\n'
     printf '%s' "$push_url"
+    # Shared folders belong to another user; without this git refuses them ("dubious ownership").
+    local sp
+    while read -r _ sp; do printf '[safe]\n\tdirectory = %s\n' "$sp"; done < <(shares_list)
   } > "$f"
   chmod 0644 "$f"
 }
@@ -588,7 +594,19 @@ apply_policy() {
   # Write in place (same inode): Docker mode bind-mounts this single file.
   [[ -f "$MANAGED_CONFIG" ]] || install -m 0644 -o root -g root /dev/null "$MANAGED_CONFIG"
   cat "$src" > "$MANAGED_CONFIG"
-  log "Kebijakan persetujuan: $name"
+  # With a writable share (option C) the agent may read/edit .env files, after approval.
+  if shares_has_rw && command -v node >/dev/null; then
+    node -e '
+      const fs = require("fs"); const f = process.argv[1];
+      const c = JSON.parse(fs.readFileSync(f, "utf8")); const p = c.permission;
+      for (const tool of ["read", "edit"]) {
+        if (p[tool] && typeof p[tool] === "object") for (const k of ["*.env", "*.env.*"]) p[tool][k] = "ask";
+      }
+      fs.writeFileSync(f, JSON.stringify(c, null, 2) + "\n");' "$MANAGED_CONFIG"
+    log "Kebijakan persetujuan: $name (+ .env boleh dibaca/diedit setelah disetujui)"
+  else
+    log "Kebijakan persetujuan: $name"
+  fi
 }
 
 node_or_python_json_ok() {
@@ -869,6 +887,22 @@ save_install_conf() {
   ln -sfn "$REPO_DIR/otb" /usr/local/bin/otb
 }
 
+# Option A: repositories to clone into the workspace right away (more later: otb clone <url>).
+clone_repos() {
+  local urls="${OTB_CLONE:-}" u name
+  if [[ -z "$urls" && $INTERACTIVE -eq 1 && ( ! -f "$INSTALL_CONF.cloned" || $RECONFIGURE -eq 1 ) ]]; then
+    printf '\n\033[1mRepo untuk workspace\033[0m (opsional; agen bekerja di salinan ini)\n' >/dev/tty
+    urls="$(ask "  URL git, pisahkan dengan spasi (Enter untuk lewati)" "")"
+  fi
+  touch "$INSTALL_CONF.cloned"
+  for u in $urls; do
+    name="$(basename "$u")"; name="${name%.git}"
+    if [[ -d "$WORKSPACE/$name" ]]; then log "$WORKSPACE/$name sudah ada; dilewati."; continue; fi
+    "$REPO_DIR/otb" clone "$u" >/dev/null 2>&1 && ok "Di-clone: $WORKSPACE/$name" \
+      || warn "Gagal clone $u (repo privat? jalankan dulu: otb github-key, lalu otb clone $u)"
+  done
+}
+
 # --------------------------------------------------------------------------- main
 main() {
   [[ $INTERACTIVE -eq 1 ]] && printf '\n\033[1mOpenCode Telegram Bot — instalasi aman\033[0m\n' >/dev/tty
@@ -879,6 +913,9 @@ main() {
   configure_telegram
   if [[ "$MODE" == "systemd" ]]; then install_systemd_mode; else install_docker_mode; fi
   configure_model
+  configure_shares
+  apply_shares
+  write_agent_gitconfig
   choose_policy
   apply_policy
   choose_harden_host
@@ -900,6 +937,7 @@ main() {
     rm -f "$vlog"
     die "Ada uji keamanan yang gagal (detail: otb verify). Bot tetap berjalan; periksa sebelum dipakai."
   fi
+  clone_repos
   notify_telegram
   cat >&2 <<EOF
 
@@ -909,6 +947,7 @@ $(printf '\033[1;32m')Selesai.$(printf '\033[0m') Perintah berguna:
   otb verify        uji keamanan
   otb reconfigure   ganti token / model / API key
   otb update        perbarui ke rilis terbaru
+  otb shares        folder di luar workspace yang boleh diakses agen
 Workspace proyek: $WORKSPACE  (clone repo: otb clone <url>)
 EOF
 }

@@ -71,8 +71,35 @@ if [[ $mode_a -eq 1 || $mode_b -eq 1 ]]; then
     'h=/var/lib/otb-agent; [ -d /home/agent ] && h=/home/agent; mkdir -p "$h/.opencode/plugins" && touch "$h/.opencode/plugins/x.ts"'
   expect_denied as_agent "Agent cannot read the Telegram bot token" \
     'cat /etc/otb/bot.env || cat /data/.env || ls /var/lib/otb-bot'
-  expect_denied as_agent "Agent cannot read /root or other users' /home" \
-    'ls /root || ls /home | grep -vxq agent'
+  expect_denied as_agent "Agent cannot see anything in /root" 'ls -A /root 2>/dev/null | grep -q .'
+  shares="$(awk '$1 ~ /^(ro|rw)$/ && $2 ~ /^\// {print $1, $2}' /etc/otb/shares.conf 2>/dev/null)"
+  if [[ $mode_b -eq 1 ]]; then
+    expect_denied as_agent "Agent cannot read other users' /home" 'ls /home | grep -vxq agent'
+  else
+    # Only the shared folders (and the directories leading to them) may be visible in /home.
+    leak=""
+    for h in /home/*/; do
+      h="${h%/}"; [[ -d "$h" ]] || continue
+      allowed="$(awk -v h="$h/" 'index($2, h) == 1 { s = substr($2, length(h) + 1); sub(/\/.*/, "", s); print s }' <<<"$shares" | sort -u)"
+      seen="$(as_agent "ls -A '$h' 2>/dev/null" || true)"
+      while IFS= read -r e; do
+        [[ -z "$e" ]] && continue
+        grep -qxF "$e" <<<"$allowed" || leak+=" $h/$e"
+      done <<<"$seen"
+    done
+    if [[ -z "$leak" ]]; then pass "Agent sees nothing in /home except shared folders"
+    else fail "Agent can see unshared files in /home:$leak"; fi
+  fi
+  while read -r smode spath; do
+    [[ -z "$spath" ]] && continue
+    t="$spath/.otb-verify-$$"
+    if [[ "$smode" == rw ]]; then
+      expect_allowed as_agent "Agent can write shared folder $spath (rw)" "touch '$t' && rm -f '$t'"
+    else
+      expect_allowed as_agent "Agent can read shared folder $spath (ro)" "ls '$spath' >/dev/null"
+      expect_denied as_agent "Agent cannot write shared folder $spath (ro)" "touch '$t'"
+    fi
+  done <<<"$shares"
   expect_denied as_agent "Agent cannot become root (sudo/su)" \
     'sudo -n true || su -c true root </dev/null'
   if [[ $mode_a -eq 1 ]]; then
@@ -89,6 +116,10 @@ if [[ $mode_a -eq 1 || $mode_b -eq 1 ]]; then
   section "Bot sandbox"
   expect_denied as_bot "Bot cannot write in /srv/workspace" \
     'touch /srv/workspace/.otb-bot-x'
+  while read -r _ spath; do
+    [[ -z "$spath" ]] && continue
+    expect_denied as_bot "Bot cannot write shared folder $spath" "touch '$spath/.otb-bot-x'"
+  done <<<"$shares"
   expect_denied as_bot "Bot cannot read the agent's provider API key" \
     'cat /etc/otb/agent.env'
   if [[ $mode_a -eq 1 ]]; then

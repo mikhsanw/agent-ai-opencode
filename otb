@@ -13,6 +13,9 @@ log()  { printf '\033[1;34m[otb]\033[0m %s\n' "$*" >&2; }
 MODE="$(sed -n 's/^MODE=//p' "$INSTALL_CONF")"
 REPO_DIR="$(sed -n 's/^REPO_DIR=//p' "$INSTALL_CONF")"
 COMPOSE=(docker compose -f "$REPO_DIR/docker-compose.yml")
+ETC_DIR=/etc/otb
+# shellcheck source=lib/shares.sh
+source "$REPO_DIR/lib/shares.sh"
 # The installer code is owned by root; without this, git refuses it for other users
 # ("dubious ownership"). Read-only use by non-root (otb version) is safe.
 repo_git() { git -c safe.directory="$REPO_DIR" -C "$REPO_DIR" "$@"; }
@@ -31,6 +34,9 @@ Pemakaian: otb <perintah>
   attach               buka TUI OpenCode yang terhubung ke agen (sesi yang sama dengan Telegram)
   policy [nama]        lihat/ganti persetujuan perintah: otomatis | seimbang | ketat | custom
   github-key [test|off] beri agen akses git push ke GitHub (setiap push tetap ditanya)
+  shares               daftar folder di luar workspace yang boleh diakses agen
+  share <path> [--write]  izinkan agen membaca (atau --write: menulis, termasuk .env & database)
+  unshare <path>       cabut akses agen ke folder itu
   reconfigure          ganti token, user ID, model, atau API key
   update [tag]         perbarui ke rilis terbaru (atau tag tertentu)
   uninstall [--purge]  hapus layanan; --purge juga menghapus konfigurasi dan workspace
@@ -294,6 +300,45 @@ cmd_github_key_test() {
   fi
 }
 
+cmd_shares() {
+  if [[ -z "$(shares_list)" ]]; then echo "Belum ada folder yang dibagikan. Tambah: otb share <path> [--write]"; return 0; fi
+  echo "Folder yang boleh diakses agen (ro = baca saja, rw = baca-tulis + .env + database):"
+  shares_list | sed 's/^/  /'
+}
+
+cmd_share() {
+  local p="" mode=ro real a
+  for a in "$@"; do case "$a" in --write|-w) mode=rw ;; *) p="$a" ;; esac; done
+  [[ -n "$p" ]] || die "Pemakaian: otb share <path> [--write]"
+  [[ "$MODE" == systemd ]] || die "Berbagi folder hanya didukung di mode systemd."
+  real="$(share_validate "$p")"
+  if [[ "$mode" == rw ]]; then
+    cat <<EOF
+PERHATIAN: agen akan bisa MENGUBAH $real, membaca .env-nya, dan memakai databasenya.
+Isi .env dan data database bisa terkirim ke penyedia model AI dan muncul di Telegram.
+EOF
+    git -c safe.directory="$real" -C "$real" rev-parse --git-dir >/dev/null 2>&1 \
+      || echo "PERINGATAN: $real bukan repo git; perubahan agen tidak bisa dilihat/dibatalkan."
+    echo "Pastikan database punya backup rutin."
+    read -r -p "Ketik 'yes' untuk melanjutkan: " a </dev/tty || a=""
+    [[ "$a" == yes ]] || { log "Dibatalkan."; return 0; }
+  fi
+  { shares_list | grep -v " $real\$" || true; echo "$mode $real"; } > "$SHARES_CONF.tmp"
+  chmod 0644 "$SHARES_CONF.tmp"; mv "$SHARES_CONF.tmp" "$SHARES_CONF"
+  reapply || die "Gagal menerapkan konfigurasi."
+  log "Agen sekarang bisa $([[ $mode == rw ]] && echo "membaca & menulis" || echo "membaca") $real. Buka di Telegram: /open"
+}
+
+cmd_unshare() {
+  local p="${1:-}" real
+  [[ -n "$p" ]] || die "Pemakaian: otb unshare <path>"
+  real="$(readlink -f -- "$p" 2>/dev/null || echo "$p")"
+  shares_list | grep -q " $real\$" || die "$real tidak ada di daftar (lihat: otb shares)."
+  { shares_list | grep -v " $real\$" || true; } > "$SHARES_CONF.tmp"
+  chmod 0644 "$SHARES_CONF.tmp"; mv "$SHARES_CONF.tmp" "$SHARES_CONF"
+  reapply || die "Gagal menerapkan konfigurasi."
+}
+
 cmd_clone() {
   local url="${1:-}" name="${2:-}"
   [[ -n "$url" ]] || die "Pemakaian: otb clone <url> [nama-folder]"
@@ -347,9 +392,12 @@ EOF
   read -r -p "Ketik 'yes' untuk melanjutkan: " reply </dev/tty || reply=""
   [[ "$reply" == "yes" ]] || { log "Dibatalkan."; return 0; }
 
+  local sp
+  while read -r _ sp; do share_revoke "$sp"; done < <(shares_list "$SHARES_APPLIED")
   if [[ "$MODE" == "systemd" ]]; then
     systemctl disable --now otb-bot.service otb-agent.service 2>/dev/null || true
     rm -f /etc/systemd/system/otb-bot.service /etc/systemd/system/otb-agent.service
+    rm -rf /etc/systemd/system/otb-bot.service.d /etc/systemd/system/otb-agent.service.d
     systemctl daemon-reload
   else
     "${COMPOSE[@]}" down --rmi all -v 2>/dev/null || true
@@ -372,6 +420,9 @@ case "$cmd" in
   verify) need_root verify; exec "$REPO_DIR/verify.sh" ;;
   clone) need_root clone "$@"; cmd_clone "$@" ;;
   attach) need_root attach; cmd_attach ;;
+  shares) cmd_shares ;;
+  share) need_root share "$@"; cmd_share "$@" ;;
+  unshare) need_root unshare "$@"; cmd_unshare "$@" ;;
   github-key)
     need_root github-key "$@"
     case "${1:-}" in test) cmd_github_key_test ;; *) cmd_github_key "$@" ;; esac ;;
