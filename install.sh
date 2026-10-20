@@ -613,6 +613,26 @@ install_docker_mode() {
   docker compose -f "$REPO_DIR/docker-compose.yml" build --quiet
 }
 
+# Earlier versions of verify.sh left OpenCode's "global" project pointing at a deleted test
+# folder, so the bot opened sessions there and failed with "FileSystem.realPath ... ENOENT".
+# Point it back to "/" (OpenCode's own default) with OpenCode's database tool. Idempotent.
+repair_stale_test_project() {
+  local sql="UPDATE project SET worktree='/', vcs=NULL WHERE id='global' AND worktree LIKE '/srv/workspace/.otb-verify-%';"
+  if [[ "$MODE" == "systemd" ]]; then
+    [[ -f /var/lib/otb-agent/.local/share/opencode/opencode.db ]] || return 0
+    systemctl stop otb-agent.service 2>/dev/null || true
+    (cd / && runuser -u otb-agent -- env HOME=/var/lib/otb-agent XDG_CONFIG_HOME="$ETC_DIR/agent-xdg" \
+      XDG_DATA_HOME=/var/lib/otb-agent/.local/share OPENCODE_DISABLE_DEFAULT_PLUGINS=1 \
+      "$OPT_DIR/agent/node_modules/.bin/opencode" db "$sql" >/dev/null 2>&1) || true
+  else
+    docker volume inspect otb_agent-home >/dev/null 2>&1 || return 0
+    docker compose -f "$REPO_DIR/docker-compose.yml" stop agent >/dev/null 2>&1 || true
+    docker compose -f "$REPO_DIR/docker-compose.yml" run --rm --no-deps -T \
+      -e OPENCODE_DISABLE_DEFAULT_PLUGINS=1 --entrypoint /opt/otb/agent/node_modules/.bin/opencode \
+      agent db "$sql" >/dev/null 2>&1 || true
+  fi
+}
+
 # --------------------------------------------------------------------------- start
 start_services() {
   if [[ "$MODE" == "systemd" ]]; then
@@ -768,6 +788,7 @@ main() {
   [[ "$HARDEN_HOST" == 1 ]] && harden_host
 
   log "Menjalankan layanan"
+  repair_stale_test_project
   start_services
   wait_for_agent || die "OpenCode tidak merespons. Cek: otb logs agent"
   check_model

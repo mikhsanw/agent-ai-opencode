@@ -25,6 +25,7 @@ Pemakaian: otb <perintah>
   restart              restart bot dan agen
   verify               jalankan uji keamanan
   clone <url> [nama]   clone repo ke $WORKSPACE sebagai user agen
+  attach               buka TUI OpenCode yang terhubung ke agen (sesi yang sama dengan Telegram)
   reconfigure          ganti token, user ID, model, atau API key
   update [tag]         perbarui ke rilis terbaru (atau tag tertentu)
   uninstall [--purge]  hapus layanan; --purge juga menghapus konfigurasi dan workspace
@@ -71,6 +72,22 @@ cmd_restart() {
   if [[ "$MODE" == "systemd" ]]; then systemctl restart otb-agent.service otb-bot.service
   else "${COMPOSE[@]}" restart; fi
   log "Layanan di-restart."
+}
+
+# The TUI is only a client: tools still run inside the agent sandbox, not in this terminal.
+cmd_attach() {
+  local pw
+  pw="$(sed -n 's/^OPENCODE_SERVER_PASSWORD=//p' /etc/otb/agent.env)"
+  if [[ "$MODE" == "systemd" ]]; then
+    local tmp; tmp="$(mktemp -d)"
+    trap 'rm -rf "$tmp"' EXIT
+    HOME="$tmp" XDG_CONFIG_HOME="$tmp/c" XDG_DATA_HOME="$tmp/d" XDG_CACHE_HOME="$tmp/cache" \
+      OPENCODE_SERVER_PASSWORD="$pw" OPENCODE_DISABLE_DEFAULT_PLUGINS=1 \
+      /opt/otb/agent/node_modules/.bin/opencode attach --dir "$WORKSPACE" http://127.0.0.1:4096
+  else
+    docker exec -it -e OPENCODE_SERVER_PASSWORD="$pw" -e HOME=/tmp/attach otb-agent \
+      /opt/otb/agent/node_modules/.bin/opencode attach --dir "$WORKSPACE" http://127.0.0.1:4096
+  fi
 }
 
 cmd_clone() {
@@ -150,6 +167,7 @@ case "$cmd" in
   restart) need_root restart; cmd_restart ;;
   verify) need_root verify; exec "$REPO_DIR/verify.sh" ;;
   clone) need_root clone "$@"; cmd_clone "$@" ;;
+  attach) need_root attach; cmd_attach ;;
   reconfigure) need_root reconfigure; exec "$REPO_DIR/install.sh" --mode "$MODE" --reconfigure --no-harden-host ;;
   update) need_root update "$@"; cmd_update "$@" ;;
   uninstall) need_root uninstall "$@"; cmd_uninstall "$@" ;;

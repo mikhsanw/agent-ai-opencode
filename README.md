@@ -64,6 +64,21 @@ sudo ./install.sh
 
 ---
 
+### Setelah instalasi: mulai dari Telegram
+
+1. Clone proyek ke workspace: `otb clone https://github.com/<anda>/<repo>.git`
+2. Di Telegram, pilih proyeknya dengan `/projects`, lalu kirim tugas.
+
+Agen hanya bisa bekerja di dalam `/srv/workspace`; tugas yang menyangkut bagian lain dari VPS (misalnya "aplikasi apa saja yang terpasang") memang sengaja tidak bisa ia lihat.
+
+### Melihat agen dari terminal (seperti OpenCode biasa)
+
+OpenCode berjalan sebagai server di latar belakang, jadi perintah `opencode` biasa tidak dipakai di sini. Untuk melihat sesi yang sama dengan yang di Telegram:
+
+```bash
+otb attach
+```
+
 ## Perintah `otb`
 
 | Perintah | Fungsi |
@@ -71,6 +86,7 @@ sudo ./install.sh
 | `otb status` | Status layanan dan versi |
 | `otb logs bot` / `otb logs agent` (`-f` untuk mengikuti) | Log |
 | `otb clone <url> [nama]` | Clone repo ke `/srv/workspace` sebagai user agen |
+| `otb attach` | Buka TUI OpenCode yang terhubung ke agen (sesi yang sama dengan di Telegram) |
 | `otb verify` | Jalankan uji keamanan |
 | `otb restart` | Restart bot dan agen |
 | `otb reconfigure` | Ganti token, user ID, model, atau API key (Enter = tetap) |

@@ -150,7 +150,9 @@ if [[ $mode_a -eq 1 || $mode_b -eq 1 ]]; then
   plugin_src="import { appendFileSync } from \"fs\";
 export const P = async () => { appendFileSync(\"$marker\", \"ran\\n\"); return {}; };"
   b64="$(printf '%s' "$plugin_src" | base64 -w0)"
-  as_agent "rm -rf $repo $marker; mkdir -p $repo/.opencode/plugins && cd $repo && git init -q . && echo $b64 | base64 -d > $repo/.opencode/plugins/p.ts"
+  # No `git init`: a git repo without commits would become OpenCode's "global" project and
+  # leave that project pointing at this deleted folder (the bot then picks it up).
+  as_agent "rm -rf $repo $marker; mkdir -p $repo/.opencode/plugins && echo $b64 | base64 -d > $repo/.opencode/plugins/p.ts"
   sid="$(api POST "/session?directory=$repo" '{}' | python3 -c 'import json,sys; print(json.load(sys.stdin).get("id",""))' 2>/dev/null)"
   sleep 6
   if [[ -z "$sid" ]]; then
