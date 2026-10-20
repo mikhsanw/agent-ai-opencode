@@ -1,0 +1,155 @@
+#!/usr/bin/env bash
+# otb - kelola OpenCode Telegram Bot yang terpasang dengan install.sh
+set -euo pipefail
+umask 022
+
+INSTALL_CONF=/etc/otb/install.conf
+WORKSPACE=/srv/workspace
+
+die()  { printf '\033[1;31m[otb] GAGAL:\033[0m %s\n' "$*" >&2; exit 1; }
+log()  { printf '\033[1;34m[otb]\033[0m %s\n' "$*" >&2; }
+
+[[ -f "$INSTALL_CONF" ]] || die "otb belum terpasang (tidak ada $INSTALL_CONF). Jalankan install.sh dulu."
+MODE="$(sed -n 's/^MODE=//p' "$INSTALL_CONF")"
+REPO_DIR="$(sed -n 's/^REPO_DIR=//p' "$INSTALL_CONF")"
+COMPOSE=(docker compose -f "$REPO_DIR/docker-compose.yml")
+
+need_root() { [[ $EUID -eq 0 ]] || exec sudo "$0" "$@"; }
+
+usage() {
+  cat <<EOF
+Pemakaian: otb <perintah>
+
+  status               status layanan dan versi
+  logs [bot|agent] [-f] log layanan (default: bot)
+  restart              restart bot dan agen
+  verify               jalankan uji keamanan
+  clone <url> [nama]   clone repo ke $WORKSPACE sebagai user agen
+  reconfigure          ganti token, user ID, model, atau API key
+  update [tag]         perbarui ke rilis terbaru (atau tag tertentu)
+  uninstall [--purge]  hapus layanan; --purge juga menghapus konfigurasi dan workspace
+  version              versi yang terpasang
+EOF
+}
+
+cmd_version() {
+  local ref="(bukan repo git)"
+  git -C "$REPO_DIR" rev-parse --git-dir >/dev/null 2>&1 \
+    && ref="$(git -C "$REPO_DIR" describe --tags --always 2>/dev/null)"
+  echo "otb $ref (mode $MODE)"
+  echo "  opencode-telegram-bot $(sed -n 's/.*"@grinev\/opencode-telegram-bot": "\(.*\)".*/\1/p' "$REPO_DIR/deploy/bot/package.json")"
+  echo "  opencode-ai           $(sed -n 's/.*"opencode-ai": "\(.*\)".*/\1/p' "$REPO_DIR/deploy/agent/package.json")"
+}
+
+cmd_status() {
+  cmd_version
+  echo
+  if [[ "$MODE" == "systemd" ]]; then
+    systemctl --no-pager --lines=0 status otb-agent.service otb-bot.service 2>/dev/null | grep -E '●|Active:' || true
+  else
+    "${COMPOSE[@]}" ps --format 'table {{.Name}}\t{{.Status}}'
+  fi
+}
+
+cmd_logs() {
+  local svc="bot" follow=()
+  for a in "$@"; do
+    case "$a" in
+      bot|agent) svc="$a" ;;
+      -f|--follow) follow=(-f) ;;
+      *) die "Argumen tidak dikenal: $a" ;;
+    esac
+  done
+  if [[ "$MODE" == "systemd" ]]; then
+    journalctl -u "otb-$svc.service" -n 100 --no-pager "${follow[@]}"
+  else
+    docker logs --tail 100 "${follow[@]}" "otb-$svc"
+  fi
+}
+
+cmd_restart() {
+  if [[ "$MODE" == "systemd" ]]; then systemctl restart otb-agent.service otb-bot.service
+  else "${COMPOSE[@]}" restart; fi
+  log "Layanan di-restart."
+}
+
+cmd_clone() {
+  local url="${1:-}" name="${2:-}"
+  [[ -n "$url" ]] || die "Pemakaian: otb clone <url> [nama-folder]"
+  [[ -n "$name" ]] || { name="$(basename "$url")"; name="${name%.git}"; }
+  [[ "$name" =~ ^[A-Za-z0-9._-]+$ ]] || die "Nama folder tidak valid: $name"
+  umask 0027
+  if [[ "$MODE" == "systemd" ]]; then
+    runuser -u otb-agent -- env HOME=/var/lib/otb-agent XDG_CONFIG_HOME=/etc/otb/agent-xdg \
+      git clone -- "$url" "$WORKSPACE/$name"
+  else
+    docker exec otb-agent git clone -- "$url" "$WORKSPACE/$name"
+  fi
+  log "Siap: $WORKSPACE/$name. Pilih proyek ini di Telegram dengan /projects."
+}
+
+cmd_update() {
+  local target="${1:-}" current
+  git -C "$REPO_DIR" rev-parse --git-dir >/dev/null 2>&1 || die "$REPO_DIR bukan repo git; update manual."
+  git -C "$REPO_DIR" fetch --tags --force --quiet origin
+  [[ -n "$target" ]] || target="$(git -C "$REPO_DIR" tag --list 'v*' --sort=-v:refname | head -n1)"
+  [[ -n "$target" ]] || die "Tidak ada tag rilis di remote."
+  current="$(git -C "$REPO_DIR" describe --tags --always)"
+  if [[ "$(git -C "$REPO_DIR" rev-parse HEAD)" == "$(git -C "$REPO_DIR" rev-parse "$target^{commit}")" ]]; then
+    log "Sudah di $target."; return 0
+  fi
+  echo "Perubahan $current -> $target:"
+  git -C "$REPO_DIR" log --oneline "HEAD..$target" | sed 's/^/  /'
+  read -r -p "Lanjutkan update? (y/n) [n]: " reply </dev/tty || reply=""
+  [[ "$reply" =~ ^[Yy] ]] || { log "Update dibatalkan."; return 0; }
+  git -C "$REPO_DIR" -c advice.detachedHead=false checkout --quiet "$target"
+  exec "$REPO_DIR/install.sh" --mode "$MODE"
+}
+
+cmd_uninstall() {
+  local purge=0
+  [[ "${1:-}" == "--purge" ]] && purge=1
+  cat <<EOF
+Yang akan dihapus:
+  - layanan otb (mode $MODE) beserta image/volume Docker atau unit systemd
+  - /opt/otb/agent, /opt/otb/bot, user otb-agent/otb-bot/otb-build, perintah otb
+EOF
+  if [[ $purge -eq 1 ]]; then
+    echo "  - PERMANEN: /etc/otb (token & API key), /etc/opencode, dan $WORKSPACE (semua proyek!)"
+  else
+    echo "Yang DIPERTAHANKAN: /etc/otb (konfigurasi) dan $WORKSPACE (proyek). Pakai --purge untuk ikut menghapus."
+  fi
+  read -r -p "Ketik 'yes' untuk melanjutkan: " reply </dev/tty || reply=""
+  [[ "$reply" == "yes" ]] || { log "Dibatalkan."; return 0; }
+
+  if [[ "$MODE" == "systemd" ]]; then
+    systemctl disable --now otb-bot.service otb-agent.service 2>/dev/null || true
+    rm -f /etc/systemd/system/otb-bot.service /etc/systemd/system/otb-agent.service
+    systemctl daemon-reload
+  else
+    "${COMPOSE[@]}" down --rmi all -v 2>/dev/null || true
+  fi
+  rm -rf /opt/otb/agent /opt/otb/bot /opt/otb/README.md /var/lib/otb-bot /var/lib/otb-agent
+  for u in otb-bot otb-agent otb-build; do id -u "$u" >/dev/null 2>&1 && userdel "$u" 2>/dev/null; done
+  rm -f /usr/local/bin/otb "$INSTALL_CONF"
+  if [[ $purge -eq 1 ]]; then
+    rm -rf /etc/otb /etc/opencode "$WORKSPACE"
+    getent group otb-ws >/dev/null && groupdel otb-ws 2>/dev/null
+  fi
+  log "Uninstall selesai. Kode sumber installer tetap ada di $REPO_DIR."
+}
+
+cmd="${1:-help}"; shift || true
+case "$cmd" in
+  status) cmd_status ;;
+  logs) need_root logs "$@"; cmd_logs "$@" ;;
+  restart) need_root restart; cmd_restart ;;
+  verify) need_root verify; exec "$REPO_DIR/verify.sh" ;;
+  clone) need_root clone "$@"; cmd_clone "$@" ;;
+  reconfigure) need_root reconfigure; exec "$REPO_DIR/install.sh" --mode "$MODE" --reconfigure --no-harden-host ;;
+  update) need_root update "$@"; cmd_update "$@" ;;
+  uninstall) need_root uninstall "$@"; cmd_uninstall "$@" ;;
+  version|--version) cmd_version ;;
+  help|-h|--help) usage ;;
+  *) usage; exit 1 ;;
+esac

@@ -1,6 +1,6 @@
-# otb-hardening
+# agent-ai-opencode
 
-Setup aman untuk menjalankan [opencode-telegram-bot](https://github.com/grinev/opencode-telegram-bot) dan [OpenCode](https://opencode.ai) di VPS, dengan model keamanan yang terinspirasi Hermes Agent: agen dikurung di sandbox, perintah berisiko meminta persetujuan lewat Telegram, dan perintah berbahaya diblokir.
+Agen coding [OpenCode](https://opencode.ai) yang dikendalikan lewat Telegram ([opencode-telegram-bot](https://github.com/grinev/opencode-telegram-bot)), dipasang di VPS dengan **satu perintah** dan dikurung dalam sandbox. Model keamanannya terinspirasi Hermes Agent: agen diisolasi, perintah berisiko meminta persetujuan lewat Telegram, dan perintah berbahaya diblokir.
 
 Kode bot upstream **tidak diubah sama sekali**. Semua pengamanan dilakukan lewat sistem operasi (systemd atau Docker) dan konfigurasi bawaan OpenCode.
 
@@ -8,6 +8,62 @@ Kode bot upstream **tidak diubah sama sekali**. Semua pengamanan dilakukan lewat
 |---|---|
 | `@grinev/opencode-telegram-bot` | 0.26.5 |
 | `opencode-ai` (OpenCode V1) | 1.19.3 |
+
+---
+
+## Pasang cepat
+
+Di VPS **khusus** untuk bot ini (Ubuntu 24.04 atau Debian 12), login sebagai user dengan sudo, lalu:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/mikhsanw/agent-ai-opencode/v0.1.0/bootstrap.sh | sudo bash
+```
+
+Siapkan dulu:
+- **Token bot** dari [@BotFather](https://t.me/BotFather) (`/newbot`).
+- **User ID Telegram** Anda, dari [@userinfobot](https://t.me/userinfobot).
+- **API key** provider LLM (Gemini, Claude, OpenAI, OpenRouter, atau lainnya). Pasang batas pengeluaran di dashboard provider.
+
+Wizard akan menanyakan hal-hal berikut:
+
+```
+Mode [1]                      systemd (disarankan) atau docker
+Token bot                     input disembunyikan, langsung dicek ke Telegram
+User ID                       hanya akun ini yang bisa memakai bot
+Provider [1] / ID model       default: Google Gemini, gemini-2.5-pro
+API key                       input disembunyikan
+Pasang firewall? (y/n)        ufw + SSH key-only, rencananya ditampilkan dulu
+```
+
+Installer lalu memasang semua dependensi, menjalankan layanan, menjalankan uji keamanan (`verify.sh`), dan mengirim pesan **"✅ Bot OpenCode aktif"** ke Telegram Anda. Jika pesan tidak masuk, buka bot Anda di Telegram, tekan **Start**, lalu kirim `/start`.
+
+Untuk memakai Docker: `curl ... | sudo bash -s -- --mode docker`
+
+### Cara yang lebih hati-hati
+
+`curl | sudo bash` menjalankan kode dari internet sebagai root tanpa Anda baca. URL di atas sudah di-pin ke tag rilis `v0.1.0`, jadi isinya tidak berubah diam-diam. Jika ingin membaca kodenya dulu:
+
+```bash
+git clone --branch v0.1.0 https://github.com/mikhsanw/agent-ai-opencode.git
+cd agent-ai-opencode
+less bootstrap.sh install.sh          # baca dulu
+sudo ./install.sh
+```
+
+---
+
+## Perintah `otb`
+
+| Perintah | Fungsi |
+|---|---|
+| `otb status` | Status layanan dan versi |
+| `otb logs bot` / `otb logs agent` (`-f` untuk mengikuti) | Log |
+| `otb clone <url> [nama]` | Clone repo ke `/srv/workspace` sebagai user agen |
+| `otb verify` | Jalankan uji keamanan |
+| `otb restart` | Restart bot dan agen |
+| `otb reconfigure` | Ganti token, user ID, model, atau API key (Enter = tetap) |
+| `otb update [tag]` | Perbarui ke rilis terbaru; perubahannya ditampilkan dan dikonfirmasi dulu |
+| `otb uninstall [--purge]` | Hapus layanan; `--purge` ikut menghapus konfigurasi dan **semua proyek** |
 
 ---
 
@@ -33,104 +89,45 @@ Bot dan agen sengaja dipisah menjadi dua user atau container. Akibatnya, agen ya
 - Agen tidak bisa mengubah binary OpenCode, kebijakan izin, atau menanam plugin global.
 - **Plugin dari repo yang di-clone tidak dieksekusi** (lihat temuan penting di bawah).
 - API OpenCode tidak terbuka ke jaringan dan wajib password.
+- Kode installer yang dijalankan sebagai root tidak bisa diubah oleh user lain.
 - Ada limit proses, RAM, dan CPU untuk menahan build yang lepas kendali atau fork bomb.
 
 ### Yang TIDAK dijamin
 
 - **Chat Telegram tidak end-to-end encrypted.** Kode dan output melewati server Telegram. Jangan pakai bot ini untuk repo berisi kredensial produksi.
-- **Agen bisa membaca API key LLM-nya sendiri**, karena memang harus memakainya. Pasang batas pengeluaran (spending limit) di dashboard provider.
+- **Agen bisa membaca API key LLM-nya sendiri**, karena memang harus memakainya. Pasang batas pengeluaran di dashboard provider.
 - **Tidak ada egress filter.** Agen yang disusupi bisa mengirim isi workspace ke internet. Jangan simpan secret di workspace.
 - **Rule `deny` berbasis pola mudah diakali** (`bash -c`, `python -c`, base64). Rule tersebut hanyalah penghalang untuk kesalahan model. Batas keamanan yang sebenarnya adalah sandbox OS.
 
----
+### Temuan penting: plugin di repo dieksekusi otomatis
 
-## Temuan penting: plugin di repo dieksekusi otomatis
-
-Saat pengujian, ditemukan bahwa OpenCode **langsung menjalankan kode** dari `.opencode/plugins/*.ts` di sebuah repo begitu sesi dibuka di repo itu, **tanpa melewati sistem izin sama sekali**. Artinya, cukup dengan meng-clone repo jahat lalu membuka sesi, kode penyerang sudah berjalan.
-
-Hal yang sama berlaku untuk `~/.opencode/plugins` di home agen. Agen yang sudah disusupi bisa menanam plugin di situ agar ikut berjalan setiap kali server di-restart.
+Saat pengujian, ditemukan bahwa OpenCode **langsung menjalankan kode** dari `.opencode/plugins/*.ts` di sebuah repo begitu sesi dibuka di repo itu, **tanpa melewati sistem izin sama sekali**. Artinya, cukup dengan meng-clone repo jahat lalu membuka sesi, kode penyerang sudah berjalan. Hal yang sama berlaku untuk `~/.opencode/plugins` di home agen, yang bisa dipakai agen yang sudah disusupi untuk menanam kode yang ikut berjalan setiap restart.
 
 Setup ini menutup kedua jalur tersebut:
 - `OPENCODE_DISABLE_PROJECT_CONFIG=1` mematikan semua config, agent, dan plugin dari repo.
 - `~/.opencode` dan direktori config global di-mount read-only.
 
-`verify.sh` menguji serangan ini secara nyata dengan membuat repo berisi plugin, membuka sesi, lalu memastikan plugin tidak berjalan. Konsekuensinya, `opencode.json` di dalam repo Anda **diabaikan**. Semua aturan izin diatur di `/etc/opencode/opencode.json`.
+`verify.sh` menguji serangan ini secara nyata. Konsekuensinya, `opencode.json` di dalam repo Anda **diabaikan**; semua aturan izin diatur di `/etc/opencode/opencode.json`.
 
 ---
 
-## Pilih mode
+## Mode sandbox
 
-| | Mode A: systemd (default) | Mode B: Docker (opsional) |
+| | systemd (default) | Docker (opsional) |
 |---|---|---|
-| Tool tambahan | Tidak ada (cukup Node.js 22) | Docker + Compose plugin |
+| Dependensi yang dipasang otomatis | Node.js 22 (tarball resmi, dicek SHA256) | `docker.io` + `docker-compose-v2` dari repo Ubuntu |
 | Isolasi filesystem | Ya | Ya |
 | Isolasi network/PID namespace | Sebagian | Penuh |
 | Toolchain proyek (php, composer, dll.) | Pakai yang terpasang di VPS | Harus ditambahkan ke `docker/agent.Dockerfile` |
-| Skor `systemd-analyze security` | 1.6 (OK) | n/a |
+| Sumber `otb clone` | URL atau path lokal | URL saja |
 
-Kebijakan izin, file `.env`, dan `verify.sh` dipakai bersama oleh kedua mode. **Jangan jalankan keduanya sekaligus**, karena dua bot dengan token yang sama akan saling berebut update Telegram. Installer dan `verify.sh` akan menolak atau memperingatkan jika hal ini terjadi.
+Pemasangan Docker otomatis hanya untuk Ubuntu. Di Debian, pasang Docker Engine sesuai [dokumentasi resmi](https://docs.docker.com/engine/install/) terlebih dahulu.
 
----
+**Jangan jalankan kedua mode sekaligus**, karena dua bot dengan token yang sama akan saling berebut update Telegram. Installer menolak jika mode lain sedang berjalan.
 
-## Instalasi
+### Tentang verifikasi Node.js
 
-Target: VPS **khusus** untuk bot ini (Ubuntu 24.04 atau Debian 12). Jangan jalankan di VPS yang sama dengan Dry24, E-AMI, atau trading bot.
-
-### 0. Snapshot dan persiapan
-
-Buat snapshot VPS dari panel provider sebelum mulai. Ini titik rollback Anda.
-
-Khusus Mode A, pasang Node.js 22 secara system-wide. Paket `nodejs` bawaan Ubuntu terlalu lama.
-
-```bash
-curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
-sudo apt-get install -y nodejs git
-node -v   # harus >= 22.14
-```
-
-Khusus Mode B, pasang Docker Engine dan Compose plugin sesuai dokumentasi resmi Docker.
-
-### 1. Jalankan installer
-
-```bash
-git clone <URL-repo-Anda>/otb-hardening.git
-cd otb-hardening
-sudo ./install.sh                 # Mode A
-# atau
-sudo ./install.sh --mode docker   # Mode B
-```
-
-Jalankan pertama ini akan membuat user, folder, dan file konfigurasi, lalu **berhenti** dan meminta Anda mengisi data.
-
-### 2. Isi konfigurasi
-
-```bash
-sudo nano /etc/otb/bot.env     # token Telegram, user ID, model
-sudo nano /etc/otb/agent.env   # API key LLM (pilih satu)
-```
-
-Contoh untuk Gemini:
-- di `bot.env`: `OPENCODE_MODEL_PROVIDER=google` dan `OPENCODE_MODEL_ID=gemini-2.5-pro`
-- di `agent.env`: `GOOGLE_GENERATIVE_AI_API_KEY=...`
-
-`OPENCODE_SERVER_PASSWORD` sudah dibuat otomatis dan sama di kedua file. Jangan diubah kecuali Anda mengubah keduanya.
-
-### 3. Jalankan lagi installer (sekarang akan start)
-
-```bash
-sudo ./install.sh                         # atau --mode docker
-sudo ./install.sh --harden-host           # opsional: ufw + SSH key-only (ada konfirmasi)
-```
-
-`--harden-host` akan menampilkan rencananya dan meminta Anda mengetik `yes`. Langkah SSH **otomatis dilewati** jika tidak ditemukan `authorized_keys`, supaya Anda tidak terkunci di luar. Tetap biarkan sesi SSH yang sedang aktif terbuka sampai Anda berhasil login di sesi baru.
-
-### 4. Verifikasi
-
-```bash
-sudo ./verify.sh
-```
-
-Target: `0 failed`. Exit code non-zero menandakan ada yang gagal.
+Installer mengunduh tarball resmi dari nodejs.org dan mencocokkannya dengan `SHASUMS256.txt`. Ini melindungi dari unduhan yang rusak atau diubah di tengah jalan. Namun karena daftar checksum diambil dari server yang sama, cara ini **tidak** melindungi jika server nodejs.org sendiri dibobol. Tidak ada repo apt pihak ketiga yang ditambahkan. Untuk jaringan yang memblokir nodejs.org, set `OTB_NODE_MIRROR` ke mirror lain.
 
 ---
 
@@ -138,16 +135,11 @@ Target: `0 failed`. Exit code non-zero menandakan ada yang gagal.
 
 ### Menaruh repo ke workspace
 
-Clone repo **sebagai user agen**, bukan sebagai root:
-
 ```bash
-# Mode A
-sudo -u otb-agent git clone https://github.com/<anda>/<repo>.git /srv/workspace/<repo>
-# Mode B
-sudo docker exec otb-agent git clone https://github.com/<anda>/<repo>.git /srv/workspace/<repo>
+otb clone https://github.com/<anda>/<repo>.git
 ```
 
-Untuk repo privat, gunakan **deploy key read-only** (bukan SSH key akun GitHub Anda). Taruh di `/var/lib/otb-agent/.ssh/` untuk Mode A.
+Lalu pilih proyeknya di Telegram dengan `/projects`. Untuk repo privat, gunakan **deploy key read-only** (bukan SSH key akun GitHub Anda). Pada mode systemd, taruh di `/var/lib/otb-agent/.ssh/`.
 
 ### Push hasil kerja agen (manual, oleh Anda)
 
@@ -179,59 +171,69 @@ Kebijakan default di `config/opencode-managed.json` (terpasang di `/etc/opencode
 | Akses file di luar proyek | **Diblokir** |
 | Web fetch / web search | **Minta persetujuan** |
 
-Mengizinkan `npm test` atau `php artisan test` secara otomatis **sama saja dengan mengizinkan eksekusi kode bebas**, karena agen bisa mengedit `package.json` atau file test terlebih dahulu. Jika Anda tetap ingin menambahkannya ke allowlist, edit `/etc/opencode/opencode.json` lalu restart agen:
-
-```bash
-sudo systemctl restart otb-agent          # Mode A
-sudo docker compose restart agent         # Mode B
-```
+Mengizinkan `npm test` atau `php artisan test` secara otomatis **sama saja dengan mengizinkan eksekusi kode bebas**, karena agen bisa mengedit `package.json` atau file test terlebih dahulu. Jika tetap ingin menambahkannya, edit `/etc/opencode/opencode.json` lalu jalankan `otb restart`. Perubahan ini tertimpa saat `otb update`, jadi simpan juga di fork Anda.
 
 ---
 
-## Upgrade versi
+## Instalasi otomatis (non-interaktif)
 
-1. Ubah versi di `deploy/agent/package.json` atau `deploy/bot/package.json`.
-2. Jalankan `npm install --package-lock-only` di folder itu untuk memperbarui lockfile.
-3. Cek changelog dan advisory keamanan untuk versi baru tersebut.
-4. Jalankan `sudo ./install.sh` (atau `--mode docker`), lalu `sudo ./verify.sh`.
-
-Installer hanya memasang ulang paket jika lockfile berubah. Script install npm dijalankan sebagai user `otb-build` yang tidak punya hak istimewa, bukan sebagai root.
-
----
-
-## Uninstall
+Untuk cloud-init atau skrip provisioning, semua jawaban bisa diberikan lewat environment variable:
 
 ```bash
-# Mode A
-sudo systemctl disable --now otb-bot otb-agent
-sudo rm -f /etc/systemd/system/otb-{bot,agent}.service && sudo systemctl daemon-reload
-sudo rm -rf /opt/otb /var/lib/otb-bot /var/lib/otb-agent
-sudo userdel otb-bot; sudo userdel otb-agent; sudo userdel otb-build; sudo groupdel otb-ws
-
-# Mode B
-sudo docker compose down -v
-
-# Keduanya (PERMANEN: menghapus konfigurasi dan workspace)
-sudo rm -rf /etc/otb /etc/opencode
-sudo rm -rf /srv/workspace
+curl -fsSL https://raw.githubusercontent.com/mikhsanw/agent-ai-opencode/v0.1.0/bootstrap.sh \
+  | sudo OTB_TELEGRAM_BOT_TOKEN=... OTB_TELEGRAM_USER_ID=... \
+         OTB_PROVIDER=google OTB_API_KEY=... bash -s -- --non-interactive --no-harden-host
 ```
+
+| Variable | Isi |
+|---|---|
+| `OTB_TELEGRAM_BOT_TOKEN`, `OTB_TELEGRAM_USER_ID` | Wajib |
+| `OTB_PROVIDER` | `google`, `anthropic`, `openai`, `openrouter`, atau ID provider OpenCode lain |
+| `OTB_MODEL` | Opsional; default sesuai provider |
+| `OTB_API_KEY` | Wajib |
+| `OTB_API_KEY_ENV` | Nama env API key, hanya untuk provider di luar empat di atas |
+| `OTB_NODE_MIRROR` | Opsional; mirror Node.js |
+| `OTB_REF`, `OTB_REPO_URL` | Opsional; tag atau repo lain (misalnya fork Anda) |
+
+Opsi lain untuk `install.sh`: `--mode docker`, `--harden-host`, `--no-harden-host`, `--skip-telegram-check` (jika Telegram hanya bisa diakses lewat proxy), `--no-deps`, `--reconfigure`, `--yes`.
 
 ---
 
 ## Struktur
 
 ```
+bootstrap.sh                   pemasang satu-perintah (clone tag ke /opt/otb/src -> install.sh)
+install.sh                     wizard + instalasi (idempoten, aman dijalankan ulang)
+otb                            perintah pengelolaan (terpasang di /usr/local/bin/otb)
+verify.sh                      uji keamanan untuk kedua mode
 config/opencode-managed.json   kebijakan izin OpenCode (tidak bisa ditimpa repo)
 config/*.env.example           template /etc/otb/*.env
 deploy/{agent,bot}/            package.json + lockfile (versi di-pin)
-systemd/                       unit Mode A
-docker/ + docker-compose.yml   Mode B
-install.sh                     installer (idempoten, aman dijalankan ulang)
-verify.sh                      pengujian keamanan untuk kedua mode
+systemd/                       unit mode systemd
+docker/ + docker-compose.yml   mode Docker
 ```
+
+Lokasi di VPS: konfigurasi dan secret di `/etc/otb/` (0600 root), proyek di `/srv/workspace/`, kode installer di `/opt/otb/src/`.
+
+## Upgrade versi bot atau OpenCode (untuk maintainer)
+
+1. Ubah versi di `deploy/agent/package.json` atau `deploy/bot/package.json`.
+2. Jalankan `npm install --package-lock-only` di folder itu untuk memperbarui lockfile.
+3. Cek changelog dan advisory keamanan untuk versi baru tersebut.
+4. Commit, buat tag rilis baru (misalnya `v0.1.1`), lalu push tag-nya. Ubah juga tag default di `bootstrap.sh` dan README.
+5. Di VPS: `otb update`.
 
 ## Batasan pengujian
 
-Diuji pada Ubuntu 24.04 dengan systemd, serta Docker 29 dengan Compose v5: hasilnya 25/25 lulus untuk Mode A dan 21/21 lulus untuk Mode B, plus uji kontrol negatif untuk memastikan tes serangan plugin memang mendeteksi kegagalan. Langkah `--harden-host` diuji di VM dengan network terisolasi.
+Rilis ini diuji di VM Ubuntu 24.04 dengan systemd, mulai dari kondisi **tanpa Node.js**:
+- one-liner `bootstrap.sh` dari GitHub;
+- wizard interaktif lewat terminal sungguhan;
+- mode non-interaktif;
+- menjalankan ulang (tidak ada pertanyaan ulang);
+- checksum Node.js yang dimanipulasi (instalasi dibatalkan);
+- `otb status/logs/clone/verify/reconfigure/update/uninstall`;
+- model yang tidak dikenal (muncul peringatan).
 
-Yang **belum** diuji: koneksi ke Telegram asli dan panggilan ke LLM asli, karena keduanya tidak bisa diakses dari lingkungan pengujian. Dua hal ini adalah hal pertama yang perlu Anda cek di VPS sendiri. Image Docker juga dibangun di atas base pengganti saat pengujian, karena Docker Hub tidak bisa diakses; di VPS Anda, image akan dibangun dari `node:22-bookworm-slim` asli.
+Mode Docker diuji dengan Docker 29. `verify.sh` lulus tanpa FAIL di kedua mode, termasuk uji kontrol negatif untuk serangan plugin.
+
+Yang **belum** diuji karena tidak bisa diakses dari lingkungan pengujian: koneksi ke Telegram asli, panggilan ke LLM asli, unduhan dari nodejs.org (diuji lewat mirror lokal dengan format yang sama), dan build image dari Docker Hub. Pesan "✅ Bot OpenCode aktif" di Telegram Anda adalah konfirmasi akhirnya.

@@ -185,6 +185,17 @@ fi
 
 # ---------------------------------------------------------------- hardening settings
 section "Hardening settings"
+# Code that root runs (install.sh, otb, verify.sh) must not be writable by anyone else.
+repo_dir="$(sed -n 's/^REPO_DIR=//p' /etc/otb/install.conf 2>/dev/null)"
+if [[ -n "$repo_dir" && -d "$repo_dir" ]]; then
+  writable="$(find "$repo_dir" -xdev ! -type l \( -perm -o+w -o \( -perm -g+w ! -group root \) \) 2>/dev/null | head -n 3)"
+  owner="$(stat -c '%U' "$repo_dir")"
+  if [[ -z "$writable" && ( "$owner" == root || "$repo_dir" != /opt/* ) ]]; then
+    pass "Installer code in $repo_dir is not writable by other users"
+  else
+    fail "Installer code is writable by others (root runs it): ${writable:-owner $owner}"
+  fi
+fi
 if [[ $mode_a -eq 1 ]]; then
   for u in otb-agent otb-bot; do
     nnp="$(systemctl show -p NoNewPrivileges --value $u.service)"
