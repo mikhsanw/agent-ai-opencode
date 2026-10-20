@@ -13,6 +13,9 @@ log()  { printf '\033[1;34m[otb]\033[0m %s\n' "$*" >&2; }
 MODE="$(sed -n 's/^MODE=//p' "$INSTALL_CONF")"
 REPO_DIR="$(sed -n 's/^REPO_DIR=//p' "$INSTALL_CONF")"
 COMPOSE=(docker compose -f "$REPO_DIR/docker-compose.yml")
+# The installer code is owned by root; without this, git refuses it for other users
+# ("dubious ownership"). Read-only use by non-root (otb version) is safe.
+repo_git() { git -c safe.directory="$REPO_DIR" -C "$REPO_DIR" "$@"; }
 
 need_root() { [[ $EUID -eq 0 ]] || exec sudo "$0" "$@"; }
 
@@ -35,8 +38,8 @@ EOF
 
 cmd_version() {
   local ref="(bukan repo git)"
-  git -C "$REPO_DIR" rev-parse --git-dir >/dev/null 2>&1 \
-    && ref="$(git -C "$REPO_DIR" describe --tags --always 2>/dev/null)"
+  repo_git rev-parse --git-dir >/dev/null 2>&1 \
+    && ref="$(repo_git describe --tags --always 2>/dev/null)"
   echo "otb $ref (mode $MODE)"
   echo "  opencode-telegram-bot $(sed -n 's/.*"@grinev\/opencode-telegram-bot": "\(.*\)".*/\1/p' "$REPO_DIR/deploy/bot/package.json")"
   echo "  opencode-ai           $(sed -n 's/.*"opencode-ai": "\(.*\)".*/\1/p' "$REPO_DIR/deploy/agent/package.json")"
@@ -122,23 +125,23 @@ cmd_clone() {
 
 cmd_update() {
   local target="${1:-}" current
-  git -C "$REPO_DIR" rev-parse --git-dir >/dev/null 2>&1 || die "$REPO_DIR bukan repo git; update manual."
-  git -C "$REPO_DIR" fetch --tags --force --quiet origin
-  [[ -n "$target" ]] || target="$(git -C "$REPO_DIR" tag --list 'v*' --sort=-v:refname | head -n1)"
+  repo_git rev-parse --git-dir >/dev/null 2>&1 || die "$REPO_DIR bukan repo git; update manual."
+  repo_git fetch --tags --force --quiet origin
+  [[ -n "$target" ]] || target="$(repo_git tag --list 'v*' --sort=-v:refname | head -n1)"
   if [[ -z "$target" ]]; then
-    git -C "$REPO_DIR" fetch --quiet origin main
+    repo_git fetch --quiet origin main
     target=origin/main
     log "Belum ada rilis bertag; memakai branch main."
   fi
-  current="$(git -C "$REPO_DIR" describe --tags --always)"
-  if [[ "$(git -C "$REPO_DIR" rev-parse HEAD)" == "$(git -C "$REPO_DIR" rev-parse "$target^{commit}")" ]]; then
+  current="$(repo_git describe --tags --always)"
+  if [[ "$(repo_git rev-parse HEAD)" == "$(repo_git rev-parse "$target^{commit}")" ]]; then
     log "Sudah di $target."; return 0
   fi
   echo "Perubahan $current -> $target:"
-  git -C "$REPO_DIR" log --oneline "HEAD..$target" | sed 's/^/  /'
+  repo_git log --oneline "HEAD..$target" | sed 's/^/  /'
   read -r -p "Lanjutkan update? (y/n) [n]: " reply </dev/tty || reply=""
   [[ "$reply" =~ ^[Yy] ]] || { log "Update dibatalkan."; return 0; }
-  git -C "$REPO_DIR" -c advice.detachedHead=false checkout --quiet "$target"
+  repo_git -c advice.detachedHead=false checkout --quiet "$target"
   exec "$REPO_DIR/install.sh" --mode "$MODE"
 }
 
