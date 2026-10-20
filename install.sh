@@ -9,7 +9,7 @@
 #
 # Opsi lain: --no-harden-host  --skip-telegram-check  --no-deps  --yes
 # Env (mode non-interaktif): OTB_TELEGRAM_BOT_TOKEN OTB_TELEGRAM_USER_ID OTB_PROVIDER
-#   OTB_MODEL OTB_API_KEY OTB_API_KEY_ENV (provider lain)  OTB_NODE_MIRROR
+#   OTB_MODEL OTB_API_KEY OTB_API_KEY_ENV (provider lain)  OTB_POLICY  OTB_NODE_MIRROR
 # Aman dijalankan ulang: konfigurasi, user, dan workspace yang sudah ada tidak ditimpa.
 set -Eeuo pipefail
 umask 022
@@ -269,9 +269,7 @@ seed_readonly_opencode_dir() {
 
 # --------------------------------------------------------------------------- shared config
 install_shared_config() {
-  log "Memasang kebijakan izin OpenCode -> $MANAGED_CONFIG"
   install -d -m 0755 -o root -g root /etc/opencode
-  install -m 0644 -o root -g root "$REPO_DIR/config/opencode-managed.json" "$MANAGED_CONFIG"
   install -d -m 0755 -o root -g root "$ETC_DIR"
 
   local secret=""
@@ -534,6 +532,53 @@ configure_model() {
 
 fmt_provider_menu() { local id name _rest; IFS=$'\t' read -r id name _rest <<<"$1"
   if [[ "$id" == cari ]]; then printf '%s' "$name"; else fmt_provider "$1"; fi; }
+
+# Approval policy. The choice lives in /etc/otb/policy.conf so updates keep it;
+# /etc/otb/policy-custom.json (if present) is used verbatim as the "custom" preset.
+POLICY_CONF="$ETC_DIR/policy.conf"
+POLICY_CUSTOM="$ETC_DIR/policy-custom.json"
+
+choose_policy() {
+  local current="" choice
+  [[ -f "$POLICY_CONF" ]] && current="$(env_value "$POLICY_CONF" POLICY)"
+  current="${OTB_POLICY:-${current:-otomatis}}"
+  if [[ $INTERACTIVE -eq 1 && ( ! -f "$POLICY_CONF" || $RECONFIGURE -eq 1 ) ]]; then
+    local def=1
+    case "$current" in seimbang) def=2 ;; ketat) def=3 ;; custom) def=4 ;; esac
+    cat >/dev/tty <<'EOF'
+
+Persetujuan perintah (bisa diganti kapan saja: otb policy)
+  1) otomatis  - jalan sendiri; hanya yang penting ditanya (hapus file, reset git,
+                 akses jaringan, ubah database, kill proses)
+  2) seimbang  - perintah baca & build/test umum jalan sendiri; lainnya ditanya
+  3) ketat     - hampir semua perintah ditanya
+EOF
+    [[ -f "$POLICY_CUSTOM" ]] && printf '  4) custom    - %s\n' "$POLICY_CUSTOM" >/dev/tty
+    choice="$(ask "  Pilih" "$def")"
+    case "$choice" in 2|seimbang) current=seimbang ;; 3|ketat) current=ketat ;; 4|custom) current=custom ;; *) current=otomatis ;; esac
+  fi
+  case "$current" in otomatis|seimbang|ketat) ;; custom) [[ -f "$POLICY_CUSTOM" ]] || die "Preset custom butuh $POLICY_CUSTOM" ;;
+    *) die "Kebijakan tidak dikenal: $current (otomatis|seimbang|ketat|custom)" ;; esac
+  printf 'POLICY=%s\n' "$current" > "$POLICY_CONF"; chmod 0644 "$POLICY_CONF"
+}
+
+apply_policy() {
+  local name src
+  name="$(env_value "$POLICY_CONF" POLICY)"
+  if [[ "$name" == custom ]]; then src="$POLICY_CUSTOM"; else src="$REPO_DIR/config/policies/$name.json"; fi
+  [[ -f "$src" ]] || die "File kebijakan tidak ditemukan: $src"
+  node_or_python_json_ok "$src" || die "$src bukan JSON yang valid."
+  # Write in place (same inode): Docker mode bind-mounts this single file.
+  [[ -f "$MANAGED_CONFIG" ]] || install -m 0644 -o root -g root /dev/null "$MANAGED_CONFIG"
+  cat "$src" > "$MANAGED_CONFIG"
+  log "Kebijakan persetujuan: $name"
+}
+
+node_or_python_json_ok() {
+  if command -v python3 >/dev/null; then python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "$1" 2>/dev/null
+  elif command -v node >/dev/null; then node -e 'JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"))' "$1" 2>/dev/null
+  else return 0; fi
+}
 
 choose_harden_host() {
   [[ -n "$HARDEN_HOST" ]] && return 0
@@ -817,6 +862,8 @@ main() {
   configure_telegram
   if [[ "$MODE" == "systemd" ]]; then install_systemd_mode; else install_docker_mode; fi
   configure_model
+  choose_policy
+  apply_policy
   choose_harden_host
   save_install_conf
   [[ "$HARDEN_HOST" == 1 ]] && harden_host

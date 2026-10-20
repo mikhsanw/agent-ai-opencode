@@ -41,6 +41,7 @@ User ID                       hanya akun ini yang bisa memakai bot
 Provider                      daftar dari katalog OpenCode; default OpenCode Zen; bisa cari 230+ provider
 API key                       nama env variable terisi otomatis; input disembunyikan
 Model                         daftar bernomor dari katalog, model gratis diberi tanda [gratis]
+Persetujuan                   otomatis (default) / seimbang / ketat
 Pasang firewall? (y/n)        ufw + SSH key-only, rencananya ditampilkan dulu
 ```
 
@@ -87,6 +88,7 @@ otb attach
 | `otb logs bot` / `otb logs agent` (`-f` untuk mengikuti) | Log |
 | `otb clone <url> [nama]` | Clone repo ke `/srv/workspace` sebagai user agen |
 | `otb attach` | Buka TUI OpenCode yang terhubung ke agen (sesi yang sama dengan di Telegram) |
+| `otb policy [nama]` | Lihat atau ganti preset persetujuan: `otomatis`, `seimbang`, `ketat`, `custom` |
 | `otb verify` | Jalankan uji keamanan |
 | `otb restart` | Restart bot dan agen |
 | `otb reconfigure` | Ganti token, user ID, model, atau API key (Enter = tetap) |
@@ -187,10 +189,29 @@ git push mine <branch>
 
 ### Persetujuan perintah
 
-Kebijakan default di `config/opencode-managed.json` (terpasang di `/etc/opencode/opencode.json`):
+Ada tiga preset, dipilih saat instalasi dan bisa diganti kapan saja tanpa install ulang:
 
-| Aksi | Perilaku |
-|---|---|
+```bash
+otb policy            # lihat preset aktif
+otb policy otomatis   # atau: seimbang, ketat, custom
+```
+
+| Preset | Jalan sendiri | Ditanya lewat tombol Telegram |
+|---|---|---|
+| **otomatis** (default) | hampir semua perintah: baca, edit, build, test, `git add/commit/checkout`, `npm`, `composer`, `php artisan migrate`, dll. | yang penting saja: hapus file (`rm`, `find -delete`), `git reset --hard/clean/rebase/restore`, jaringan (`curl`, `wget`, `rsync`), database (`mysql`, `psql`, `artisan migrate:fresh/rollback/db:wipe/db:seed`), `kill`, `chmod`, shell bersarang (`bash -c`), web fetch |
+| **seimbang** | perintah baca dan build/test umum | semua yang lain |
+| **ketat** | `ls`, `pwd`, `git status/diff/log` | semua yang lain |
+| **custom** | sesuai `/etc/otb/policy-custom.json` | |
+
+**Diblokir di semua preset:** `git push`, `git config`, `sudo`, `su`, `ssh`, `scp`, `nc`, `docker`, `systemctl`, `crontab`, akses file di luar proyek, serta edit `opencode.json`, `.opencode/`, `.git/`, dan `.env`.
+
+Aturan preset **otomatis** diuji terhadap OpenCode sungguhan (dengan model AI tiruan yang menyuruh agen menjalankan perintah tertentu). Perintah berantai (`ls && rm -rf x`, `a; rm b`), subshell `$(rm …)`, pipe ke `xargs rm`, `bash -c '…'`, path lengkap (`/bin/rm`), `\rm`, dan pembungkus (`command`, `nice`, `timeout`, `env`) semuanya tetap ditanya.
+
+**Batasan yang jujur:** aturan berbasis nama perintah tidak bisa menangkap semuanya. `node -e "fs.rmSync(…)"`, `python -c …`, atau skrip npm yang menghapus file tetap jalan tanpa ditanya di preset otomatis. Karena itu **batas keamanan yang sebenarnya adalah sandbox**: apa pun preset-nya, agen tetap tidak bisa menulis di luar `/srv/workspace`, membaca token bot, menjadi root, atau `git push`. Commit pekerjaan secara rutin supaya file yang terhapus bisa dikembalikan.
+
+Preset **custom**: `otb policy custom` membuat `/etc/otb/policy-custom.json` dari preset aktif; edit file itu, lalu jalankan `otb policy custom` lagi. Format aturannya mengikuti [dokumentasi izin OpenCode](https://opencode.ai/docs/permissions/); aturan yang cocok paling akhir yang berlaku. Pilihan preset dan file custom disimpan di `/etc/otb`, jadi **tidak tertimpa saat `otb update`**.
+
+---|---|
 | Baca file, glob, grep | Langsung jalan (kecuali `.env`, yang di-deny) |
 | Edit file di dalam proyek | Langsung jalan (kecuali `opencode.json`, `.opencode/`, `.git/`, `.env`) |
 | `ls`, `pwd`, `git status/diff/log/branch` | Langsung jalan |
@@ -220,6 +241,7 @@ curl -fsSL https://raw.githubusercontent.com/mikhsanw/agent-ai-opencode/main/boo
 | `OTB_MODEL` | Opsional; default model bawaan provider di katalog OpenCode |
 | `OTB_API_KEY` | Wajib |
 | `OTB_API_KEY_ENV` | Opsional; nama env API key (otomatis dari katalog OpenCode) |
+| `OTB_POLICY` | Opsional; `otomatis` (default), `seimbang`, `ketat`, `custom` |
 | `OTB_NODE_MIRROR` | Opsional; mirror Node.js |
 | `OTB_REF`, `OTB_REPO_URL` | Opsional; tag atau repo lain (misalnya fork Anda) |
 
@@ -236,7 +258,7 @@ install.sh                     wizard + instalasi (idempoten, aman dijalankan ul
 lib/catalog.mjs                membaca katalog provider/model dari OpenCode untuk wizard
 otb                            perintah pengelolaan (terpasang di /usr/local/bin/otb)
 verify.sh                      uji keamanan untuk kedua mode
-config/opencode-managed.json   kebijakan izin OpenCode (tidak bisa ditimpa repo)
+config/policies/*.json         preset persetujuan (otomatis, seimbang, ketat); dipasang sebagai managed config OpenCode
 config/*.env.example           template /etc/otb/*.env
 deploy/{agent,bot}/            package.json + lockfile (versi di-pin)
 systemd/                       unit mode systemd

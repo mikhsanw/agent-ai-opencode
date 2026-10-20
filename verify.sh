@@ -131,11 +131,14 @@ if [[ $mode_a -eq 1 || $mode_b -eq 1 ]]; then
   fi
 fi
 if [[ -n "${cfg:-}" ]]; then
-  python3 - "$cfg" <<'PY' && pass "Managed permission policy is active (git push denied, bash asks by default)" || fail "Managed permission policy NOT active"
+  policy_name="$(sed -n 's/^POLICY=//p' /etc/otb/policy.conf 2>/dev/null)"
+  python3 - "$cfg" <<'PY' && pass "Approval policy '${policy_name:-?}' active; hard blocks in place (git push, sudo, ssh, docker, outside project)" || fail "Managed permission policy NOT active or hard blocks missing"
 import json, sys
 p = json.loads(sys.argv[1]).get("permission", {})
 b = p.get("bash", {})
-ok = isinstance(b, dict) and b.get("*") == "ask" and b.get("git push *") == "deny" and p.get("external_directory") == "deny"
+must_deny = ["git push *", "git push", "sudo *", "ssh *", "scp *", "docker *", "systemctl *", "crontab *", "git config *"]
+ok = isinstance(b, dict) and all(b.get(k) == "deny" for k in must_deny) and p.get("external_directory") == "deny" \
+     and isinstance(p.get("edit"), dict) and p["edit"].get("*opencode.json") == "deny"
 sys.exit(0 if ok else 1)
 PY
 fi

@@ -29,6 +29,7 @@ Pemakaian: otb <perintah>
   verify               jalankan uji keamanan
   clone <url> [nama]   clone repo ke $WORKSPACE sebagai user agen
   attach               buka TUI OpenCode yang terhubung ke agen (sesi yang sama dengan Telegram)
+  policy [nama]        lihat/ganti persetujuan perintah: otomatis | seimbang | ketat | custom
   reconfigure          ganti token, user ID, model, atau API key
   update [tag]         perbarui ke rilis terbaru (atau tag tertentu)
   uninstall [--purge]  hapus layanan; --purge juga menghapus konfigurasi dan workspace
@@ -86,9 +87,25 @@ cmd_logs() {
   fi
 }
 
+# Wait until the agent answers again after a restart (it takes a few seconds to start).
+wait_agent() {
+  local pw
+  pw="$(sed -n 's/^OPENCODE_SERVER_PASSWORD=//p' /etc/otb/agent.env)"
+  for _ in $(seq 1 45); do
+    if [[ "$MODE" == "systemd" ]]; then
+      printf 'user = "opencode:%s"\n' "$pw" | curl -sf -m 3 --config - http://127.0.0.1:4096/config >/dev/null 2>&1 && return 0
+    else
+      docker exec otb-bot node -e 'fetch("http://agent:4096/config",{headers:{authorization:"Basic "+Buffer.from("opencode:"+process.env.OPENCODE_SERVER_PASSWORD).toString("base64")}}).then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))' 2>/dev/null && return 0
+    fi
+    sleep 1
+  done
+  log "Agen belum merespons setelah 45 detik; cek: otb logs agent"
+}
+
 cmd_restart() {
   if [[ "$MODE" == "systemd" ]]; then systemctl restart otb-agent.service otb-bot.service
   else "${COMPOSE[@]}" restart; fi
+  wait_agent
   log "Layanan di-restart."
 }
 
@@ -106,6 +123,46 @@ cmd_attach() {
     docker exec -it -e OPENCODE_SERVER_PASSWORD="$pw" -e HOME=/tmp/attach otb-agent \
       /opt/otb/agent/node_modules/.bin/opencode attach --dir "$WORKSPACE" http://127.0.0.1:4096
   fi
+}
+
+cmd_policy() {
+  local conf=/etc/otb/policy.conf custom=/etc/otb/policy-custom.json managed=/etc/opencode/opencode.json
+  local current name="${1:-}" src
+  current="$(sed -n 's/^POLICY=//p' "$conf" 2>/dev/null)"
+  if [[ -z "$name" ]]; then
+    echo "Kebijakan aktif: ${current:-tidak diketahui}"
+    cat <<EOF
+
+  otomatis  jalan sendiri; hanya yang penting ditanya (hapus file, reset git, jaringan, database, kill)
+  seimbang  perintah baca & build/test umum jalan sendiri; lainnya ditanya
+  ketat     hampir semua perintah ditanya
+  custom    pakai $custom apa adanya (buat dari preset aktif: otb policy custom)
+
+Semua preset tetap memblokir: git push, sudo, ssh/scp, docker, systemctl, crontab, akses di luar proyek.
+Ganti dengan: otb policy <nama>
+EOF
+    return 0
+  fi
+  case "$name" in
+    otomatis|seimbang|ketat) src="$REPO_DIR/config/policies/$name.json" ;;
+    custom)
+      if [[ ! -f "$custom" ]]; then
+        install -m 0644 -o root -g root "$managed" "$custom"
+        log "Dibuat $custom dari preset ${current:-aktif}. Edit file itu, lalu jalankan lagi: otb policy custom"
+        return 0
+      fi
+      src="$custom" ;;
+    *) die "Kebijakan tidak dikenal: $name (otomatis | seimbang | ketat | custom)" ;;
+  esac
+  if command -v python3 >/dev/null; then
+    python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "$src" 2>/dev/null || die "$src bukan JSON yang valid."
+  fi
+  cat "$src" > "$managed"          # same inode: Docker mode bind-mounts this file
+  printf 'POLICY=%s\n' "$name" > "$conf"
+  if [[ "$MODE" == "systemd" ]]; then systemctl restart otb-agent.service otb-bot.service
+  else "${COMPOSE[@]}" restart agent bot >/dev/null; fi
+  wait_agent
+  log "Kebijakan persetujuan sekarang: $name (berlaku untuk perintah berikutnya)."
 }
 
 cmd_clone() {
@@ -186,6 +243,7 @@ case "$cmd" in
   verify) need_root verify; exec "$REPO_DIR/verify.sh" ;;
   clone) need_root clone "$@"; cmd_clone "$@" ;;
   attach) need_root attach; cmd_attach ;;
+  policy) if [[ -n "${1:-}" ]]; then need_root policy "$@"; fi; cmd_policy "$@" ;;
   reconfigure) need_root reconfigure; exec "$REPO_DIR/install.sh" --mode "$MODE" --reconfigure --no-harden-host ;;
   update) need_root update "$@"; cmd_update "$@" ;;
   uninstall) need_root uninstall "$@"; cmd_uninstall "$@" ;;
