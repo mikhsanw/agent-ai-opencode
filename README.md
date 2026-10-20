@@ -89,6 +89,7 @@ otb attach
 | `otb clone <url> [nama]` | Clone repo ke `/srv/workspace` sebagai user agen |
 | `otb attach` | Buka TUI OpenCode yang terhubung ke agen (sesi yang sama dengan di Telegram) |
 | `otb policy [nama]` | Lihat atau ganti preset persetujuan: `otomatis`, `seimbang`, `ketat`, `custom` |
+| `otb github-key [test\|off]` | Beri agen akses `git push` ke GitHub (setiap push tetap ditanya; force push diblokir) |
 | `otb verify` | Jalankan uji keamanan |
 | `otb restart` | Restart bot dan agen |
 | `otb reconfigure` | Ganti token, user ID, model, atau API key (Enter = tetap) |
@@ -171,9 +172,34 @@ otb clone https://github.com/<anda>/<repo>.git
 
 Lalu pilih proyeknya di Telegram dengan `/projects`. Untuk repo privat, gunakan **deploy key read-only** (bukan SSH key akun GitHub Anda). Pada mode systemd, taruh di `/var/lib/otb-agent/.ssh/`.
 
-### Push hasil kerja agen (manual, oleh Anda)
+### Mengizinkan agen `git push` (opsional)
 
-Agen bisa commit, tapi `git push` diblokir dan agen memang tidak punya kredensial push. Alurnya adalah review dulu, lalu push dari clone milik Anda sendiri:
+Secara default `git push` diblokir dan agen tidak punya kredensial. Untuk mengizinkannya:
+
+```bash
+otb github-key
+```
+
+Perintah ini membuat SSH key khusus agen di VPS, memverifikasi host key GitHub (lewat api.github.com, atau dicocokkan dengan fingerprint resmi GitHub, sehingga koneksi yang disadap ditolak), mengatur koneksi lewat `ssh.github.com:443` (tetap jalan walau port 22 diblokir provider), lalu menampilkan public key untuk ditempel di GitHub:
+
+- **Satu repo saja (disarankan):** Settings repo → Deploy keys → Add deploy key, centang **Allow write access**. Satu key hanya bisa dipakai di satu repo.
+- **Semua repo:** https://github.com/settings/ssh/new. ⚠️ Agen lalu bisa push ke **semua** repo di akun Anda; kalau agen terkena prompt injection dari satu repo, semua repo ikut terancam.
+
+Lalu uji: `otb github-key test`.
+
+Setelah aktif:
+- setiap `git push` **tetap minta persetujuan** lewat tombol Telegram, di preset apa pun;
+- **force push, `--force-with-lease`, `+branch`, hapus branch, dan `--mirror` tetap diblokir**, jadi riwayat commit tidak bisa ditimpa;
+- repo yang di-clone lewat HTTPS (`otb clone https://github.com/…`) otomatis push lewat SSH; remote tidak perlu diubah;
+- pengaturan ini bertahan saat `otb update` dan saat `otb policy` diganti.
+
+> **Penting:** "ditanya" dan "diblokir" di atas adalah aturan OpenCode berbasis nama perintah. Setelah agen memegang key, perintah tidak langsung seperti `node -e "…execSync('git push --force')…"` bisa melewatinya. Pengaman yang benar-benar kuat ada di sisi GitHub: buat **ruleset/branch protection** untuk `main` (Settings → Rules → Rulesets → *Block force pushes*, dan opsional *Restrict deletions*). Dengan itu force push ditolak GitHub, siapa pun pengirimnya.
+
+Mematikan lagi: `otb github-key off` (hapus juga key-nya di GitHub).
+
+### Push manual (tanpa memberi agen akses)
+
+Kalau tidak ingin agen bisa push, review dan push sendiri dari clone milik Anda:
 
 ```bash
 sudo usermod -aG otb-ws $USER          # sekali saja, lalu logout/login
@@ -203,24 +229,13 @@ otb policy otomatis   # atau: seimbang, ketat, custom
 | **ketat** | `ls`, `pwd`, `git status/diff/log` | semua yang lain |
 | **custom** | sesuai `/etc/otb/policy-custom.json` | |
 
-**Diblokir di semua preset:** `git push`, `git config`, `sudo`, `su`, `ssh`, `scp`, `nc`, `docker`, `systemctl`, `crontab`, akses file di luar proyek, serta edit `opencode.json`, `.opencode/`, `.git/`, dan `.env`.
+**Diblokir di semua preset:** `git push` (kecuali setelah `otb github-key`: ditanya, force push tetap diblokir), `git config`, `sudo`, `su`, `ssh`, `scp`, `nc`, `docker`, `systemctl`, `crontab`, akses file di luar proyek, serta edit `opencode.json`, `.opencode/`, `.git/`, dan `.env`.
 
 Aturan preset **otomatis** diuji terhadap OpenCode sungguhan (dengan model AI tiruan yang menyuruh agen menjalankan perintah tertentu). Perintah berantai (`ls && rm -rf x`, `a; rm b`), subshell `$(rm …)`, pipe ke `xargs rm`, `bash -c '…'`, path lengkap (`/bin/rm`), `\rm`, dan pembungkus (`command`, `nice`, `timeout`, `env`) semuanya tetap ditanya.
 
-**Batasan yang jujur:** aturan berbasis nama perintah tidak bisa menangkap semuanya. `node -e "fs.rmSync(…)"`, `python -c …`, atau skrip npm yang menghapus file tetap jalan tanpa ditanya di preset otomatis. Karena itu **batas keamanan yang sebenarnya adalah sandbox**: apa pun preset-nya, agen tetap tidak bisa menulis di luar `/srv/workspace`, membaca token bot, menjadi root, atau `git push`. Commit pekerjaan secara rutin supaya file yang terhapus bisa dikembalikan.
+**Batasan yang jujur:** aturan berbasis nama perintah tidak bisa menangkap semuanya. `node -e "fs.rmSync(…)"`, `python -c …`, atau skrip npm yang menghapus file tetap jalan tanpa ditanya di preset otomatis. Karena itu **batas keamanan yang sebenarnya adalah sandbox**: apa pun preset-nya, agen tetap tidak bisa menulis di luar `/srv/workspace`, membaca token bot, atau menjadi root, dan tanpa `otb github-key` juga tidak bisa `git push`. Commit pekerjaan secara rutin supaya file yang terhapus bisa dikembalikan.
 
 Preset **custom**: `otb policy custom` membuat `/etc/otb/policy-custom.json` dari preset aktif; edit file itu, lalu jalankan `otb policy custom` lagi. Format aturannya mengikuti [dokumentasi izin OpenCode](https://opencode.ai/docs/permissions/); aturan yang cocok paling akhir yang berlaku. Pilihan preset dan file custom disimpan di `/etc/otb`, jadi **tidak tertimpa saat `otb update`**.
-
----|---|
-| Baca file, glob, grep | Langsung jalan (kecuali `.env`, yang di-deny) |
-| Edit file di dalam proyek | Langsung jalan (kecuali `opencode.json`, `.opencode/`, `.git/`, `.env`) |
-| `ls`, `pwd`, `git status/diff/log/branch` | Langsung jalan |
-| Perintah bash lainnya (termasuk `npm test`, `composer`, `php artisan`) | **Minta persetujuan** lewat tombol di Telegram |
-| `git push`, `git config`, `sudo`, `ssh`, `scp`, `nc`, `docker`, `systemctl`, `crontab` | **Diblokir** |
-| Akses file di luar proyek | **Diblokir** |
-| Web fetch / web search | **Minta persetujuan** |
-
-Mengizinkan `npm test` atau `php artisan test` secara otomatis **sama saja dengan mengizinkan eksekusi kode bebas**, karena agen bisa mengedit `package.json` atau file test terlebih dahulu. Jika tetap ingin menambahkannya, edit `/etc/opencode/opencode.json` lalu jalankan `otb restart`. Perubahan ini tertimpa saat `otb update`, jadi simpan juga di fork Anda.
 
 ---
 
@@ -258,7 +273,8 @@ install.sh                     wizard + instalasi (idempoten, aman dijalankan ul
 lib/catalog.mjs                membaca katalog provider/model dari OpenCode untuk wizard
 otb                            perintah pengelolaan (terpasang di /usr/local/bin/otb)
 verify.sh                      uji keamanan untuk kedua mode
-config/policies/*.json         preset persetujuan (otomatis, seimbang, ketat); dipasang sebagai managed config OpenCode
+config/policies/*.json         preset persetujuan (otomatis, seimbang, ketat, dan varian -push); dipasang sebagai managed config OpenCode
+tools/gen-push-policies.py     membuat varian -push dari preset dasar
 config/*.env.example           template /etc/otb/*.env
 deploy/{agent,bot}/            package.json + lockfile (versi di-pin)
 systemd/                       unit mode systemd

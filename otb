@@ -30,6 +30,7 @@ Pemakaian: otb <perintah>
   clone <url> [nama]   clone repo ke $WORKSPACE sebagai user agen
   attach               buka TUI OpenCode yang terhubung ke agen (sesi yang sama dengan Telegram)
   policy [nama]        lihat/ganti persetujuan perintah: otomatis | seimbang | ketat | custom
+  github-key [test|off] beri agen akses git push ke GitHub (setiap push tetap ditanya)
   reconfigure          ganti token, user ID, model, atau API key
   update [tag]         perbarui ke rilis terbaru (atau tag tertentu)
   uninstall [--purge]  hapus layanan; --purge juga menghapus konfigurasi dan workspace
@@ -144,7 +145,9 @@ EOF
     return 0
   fi
   case "$name" in
-    otomatis|seimbang|ketat) src="$REPO_DIR/config/policies/$name.json" ;;
+    otomatis|seimbang|ketat)
+      src="$REPO_DIR/config/policies/$name.json"
+      grep -q '^PUSH=1' "$conf" 2>/dev/null && src="$REPO_DIR/config/policies/$name-push.json" ;;
     custom)
       if [[ ! -f "$custom" ]]; then
         install -m 0644 -o root -g root "$managed" "$custom"
@@ -158,11 +161,137 @@ EOF
     python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "$src" 2>/dev/null || die "$src bukan JSON yang valid."
   fi
   cat "$src" > "$managed"          # same inode: Docker mode bind-mounts this file
-  printf 'POLICY=%s\n' "$name" > "$conf"
+  conf_set "$conf" POLICY "$name"
   if [[ "$MODE" == "systemd" ]]; then systemctl restart otb-agent.service otb-bot.service
   else "${COMPOSE[@]}" restart agent bot >/dev/null; fi
   wait_agent
   log "Kebijakan persetujuan sekarang: $name (berlaku untuk perintah berikutnya)."
+}
+
+conf_set() { # conf_set <file> <KEY> <VALUE>  -> world-readable key=value file, other keys kept
+  local f="$1" k="$2" v="$3"
+  touch "$f"
+  { grep -v "^$k=" "$f" || true; printf '%s=%s\n' "$k" "$v"; } > "$f.tmp"
+  chmod 0644 "$f.tmp"; mv "$f.tmp" "$f"
+}
+
+# GitHub's published SSH host key fingerprints (docs.github.com, "GitHub's SSH key
+# fingerprints"). Used only when the host keys cannot be fetched from api.github.com.
+GITHUB_FPS="${OTB_GITHUB_FPS:-SHA256:+DiY3wvvV6TuJJhbpZisF/zLDA0zPMSvHdkr4UvCOqU SHA256:p2QAMXNIC1TJYWeIOttrVc98/R1BUFWu3/LiyKgUfQM SHA256:uNiVztksCsDhcc0u9e8BujQXVUpKZIDTMczCvj3tD2s}"
+GITHUB_SSH_HOST="${OTB_GITHUB_SSH_HOST:-ssh.github.com}"
+GITHUB_SSH_PORT="${OTB_GITHUB_SSH_PORT:-443}"
+
+agent_run() { # agent_run <cmd...>  -> run as the agent user with its HOME
+  if [[ "$MODE" == "systemd" ]]; then
+    (cd / && runuser -u otb-agent -- env HOME=/var/lib/otb-agent XDG_CONFIG_HOME=/etc/otb/agent-xdg "$@")
+  else
+    docker exec -i otb-agent "$@"
+  fi
+}
+
+# Known-hosts lines for GitHub, verified: from the TLS-protected API, otherwise via
+# ssh-keyscan keeping only keys whose fingerprint matches GitHub's published ones.
+github_known_hosts() {
+  local line keys tmp fp ok=""
+  keys="$( (curl -fsS -m 15 https://api.github.com/meta 2>/dev/null || true) \
+    | sed -n 's/^ *"\(ssh-[a-z0-9-]* [A-Za-z0-9+\/=]*\)",\{0,1\}$/\1/p; s/^ *"\(ecdsa-[a-z0-9-]* [A-Za-z0-9+\/=]*\)",\{0,1\}$/\1/p')"
+  if [[ -n "$keys" ]]; then
+    while IFS= read -r line; do printf '[%s]:%s %s\n' "$GITHUB_SSH_HOST" "$GITHUB_SSH_PORT" "$line"; done <<<"$keys"
+    return 0
+  fi
+  tmp="$(mktemp)"
+  ssh-keyscan -p "$GITHUB_SSH_PORT" -T 10 "$GITHUB_SSH_HOST" 2>/dev/null > "$tmp" || true
+  if ! grep -qv '^#' "$tmp"; then
+    rm -f "$tmp"; echo "unreachable" >&2; return 1
+  fi
+  while IFS= read -r line; do
+    [[ -z "$line" || "$line" == \#* ]] && continue
+    fp="$(ssh-keygen -lf - <<<"$line" 2>/dev/null | awk '{print $2}')"
+    if [[ -n "$fp" && " $GITHUB_FPS " == *" $fp "* ]]; then printf '%s\n' "$line"; ok=1; fi
+  done < "$tmp"
+  rm -f "$tmp"
+  [[ -n "$ok" ]] || { echo "mismatch" >&2; return 1; }
+}
+
+# Re-run the installer quietly to apply policy + git config; show its output only on failure.
+reapply() {
+  local logf rc=0
+  logf="$(mktemp)"
+  log "Menerapkan konfigurasi (±1 menit)…"
+  "$REPO_DIR/install.sh" --mode "$MODE" --non-interactive --skip-telegram-check --no-deps --no-harden-host >"$logf" 2>&1 || rc=$?
+  [[ $rc -eq 0 ]] || sed 's/\x1b\[[0-9;]*m//g' "$logf" | tail -n 15 >&2
+  rm -f "$logf"
+  return $rc
+}
+
+cmd_github_key() {
+  local conf=/etc/otb/policy.conf home pub kh
+  if [[ "${1:-}" == off ]]; then
+    conf_set "$conf" PUSH 0
+    reapply || die "Gagal menerapkan ulang konfigurasi (log di atas)."
+    log "git push dimatikan lagi (diblokir). Hapus juga key-nya di GitHub jika tidak dipakai."
+    return 0
+  fi
+  command -v ssh-keygen >/dev/null || { apt-get install -y -qq openssh-client >/dev/null 2>&1 || die "openssh-client belum terpasang."; }
+  if [[ "$MODE" == "systemd" ]]; then home=/var/lib/otb-agent; else home=/home/agent; fi
+
+  # Key comment = this VPS's name, so it is recognisable in GitHub's key list.
+  agent_run sh -c 'umask 077; mkdir -p "$HOME/.ssh"; [ -f "$HOME/.ssh/id_ed25519" ] || ssh-keygen -q -t ed25519 -N "" -C "$1" -f "$HOME/.ssh/id_ed25519"' \
+    sh "otb-agent@$(hostname)"
+  local why
+  if ! kh="$(github_known_hosts 2>/tmp/otb-kh.err)"; then
+    why="$(cat /tmp/otb-kh.err 2>/dev/null)"; rm -f /tmp/otb-kh.err
+    if [[ "$why" == mismatch ]]; then
+      die "BAHAYA: host key $GITHUB_SSH_HOST:$GITHUB_SSH_PORT TIDAK cocok dengan fingerprint resmi GitHub. Kemungkinan koneksi disadap; dibatalkan."
+    fi
+    die "Host key GitHub tidak bisa diambil (api.github.com dan $GITHUB_SSH_HOST:$GITHUB_SSH_PORT tidak terjangkau dari VPS ini)."
+  fi
+  rm -f /tmp/otb-kh.err
+  printf '%s\n' "$kh" | agent_run sh -c 'umask 077; cat > "$HOME/.ssh/known_hosts_github"'
+  # Port 443 works where providers block outgoing port 22.
+  agent_run sh -c "umask 077; cat > \"\$HOME/.ssh/config\"" <<EOF
+Host github.com
+  HostName $GITHUB_SSH_HOST
+  Port $GITHUB_SSH_PORT
+  User git
+  IdentityFile $home/.ssh/id_ed25519
+  IdentitiesOnly yes
+  StrictHostKeyChecking yes
+  UserKnownHostsFile $home/.ssh/known_hosts_github
+EOF
+  pub="$(agent_run cat "$home/.ssh/id_ed25519.pub")"
+
+  conf_set "$conf" PUSH 1
+  reapply || die "Gagal menerapkan ulang konfigurasi (log di atas)."
+
+  cat <<EOF
+
+Public key agen (tempel di GitHub):
+
+$pub
+
+Pilih salah satu:
+  a) Semua repo:  https://github.com/settings/ssh/new
+     PERHATIAN: agen bisa push ke SEMUA repo di akun Anda.
+  b) Satu repo saja (lebih aman): Settings repo -> Deploy keys -> Add deploy key,
+     centang "Allow write access". Satu key hanya bisa dipakai di satu repo.
+
+Setelah ditempel, uji dengan: otb github-key test
+Setiap git push tetap meminta persetujuan di Telegram; force push / hapus branch diblokir.
+Pengaman terkuat ada di GitHub: Settings repo -> Rules -> Rulesets -> "Block force pushes"
+untuk main (aturan OpenCode berbasis nama perintah bisa diakali lewat skrip).
+EOF
+}
+
+cmd_github_key_test() {
+  local out
+  out="$(agent_run ssh -T -o BatchMode=yes -o ConnectTimeout=15 git@github.com 2>&1 || true)"
+  if grep -q "successfully authenticated" <<<"$out"; then
+    log "Berhasil: $(grep -o 'Hi [^!]*' <<<"$out" | head -1). Agen bisa push."
+  else
+    printf '%s\n' "$out" >&2
+    die "Belum bisa login ke GitHub. Pastikan public key sudah ditempel (otb github-key menampilkannya lagi)."
+  fi
 }
 
 cmd_clone() {
@@ -243,6 +372,9 @@ case "$cmd" in
   verify) need_root verify; exec "$REPO_DIR/verify.sh" ;;
   clone) need_root clone "$@"; cmd_clone "$@" ;;
   attach) need_root attach; cmd_attach ;;
+  github-key)
+    need_root github-key "$@"
+    case "${1:-}" in test) cmd_github_key_test ;; *) cmd_github_key "$@" ;; esac ;;
   policy) if [[ -n "${1:-}" ]]; then need_root policy "$@"; fi; cmd_policy "$@" ;;
   reconfigure) need_root reconfigure; exec "$REPO_DIR/install.sh" --mode "$MODE" --reconfigure --no-harden-host ;;
   update) need_root update "$@"; cmd_update "$@" ;;

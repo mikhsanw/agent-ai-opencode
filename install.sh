@@ -267,6 +267,24 @@ seed_readonly_opencode_dir() {
   chown root:root "$1/.gitignore"; chmod 0644 "$1/.gitignore"
 }
 
+# Git config for the agent (read-only to it). Without push access, pushing has no default;
+# with it (otb github-key), HTTPS GitHub remotes push over SSH with the agent's key.
+write_agent_gitconfig() {
+  local f="$ETC_DIR/agent-xdg/git/config" push_default=nothing push_url=""
+  if [[ -f "$ETC_DIR/policy.conf" ]] && grep -q '^PUSH=1' "$ETC_DIR/policy.conf"; then
+    push_default=simple
+    push_url=$'[url "git@github.com:"]\n\tpushInsteadOf = https://github.com/\n'
+  fi
+  install -d -m 0755 -o root -g root "$ETC_DIR/agent-xdg/git"
+  {
+    printf '[user]\n\tname = OpenCode Agent\n\temail = agent@localhost\n'
+    printf '[push]\n\tdefault = %s\n' "$push_default"
+    printf '[core]\n\thooksPath = /dev/null\n'
+    printf '%s' "$push_url"
+  } > "$f"
+  chmod 0644 "$f"
+}
+
 # --------------------------------------------------------------------------- shared config
 install_shared_config() {
   install -d -m 0755 -o root -g root /etc/opencode
@@ -291,18 +309,7 @@ install_shared_config() {
 
   # Git identity for commits made by the agent (it has no push credentials).
   install -d -m 0755 -o root -g root "$ETC_DIR/agent-xdg" "$ETC_DIR/agent-xdg/git" "$ETC_DIR/agent-xdg/opencode"
-  if [[ ! -f "$ETC_DIR/agent-xdg/git/config" ]]; then
-    cat > "$ETC_DIR/agent-xdg/git/config" <<'EOF'
-[user]
-	name = OpenCode Agent
-	email = agent@localhost
-[push]
-	default = nothing
-[core]
-	hooksPath = /dev/null
-EOF
-    chmod 0644 "$ETC_DIR/agent-xdg/git/config"
-  fi
+  write_agent_gitconfig
   # The agent's global OpenCode config dir is read-only (no planted global plugins).
   # OpenCode only writes these files when they are missing, so pre-create them.
   seed_readonly_opencode_dir "$ETC_DIR/agent-xdg/opencode"
@@ -559,13 +566,23 @@ EOF
   fi
   case "$current" in otomatis|seimbang|ketat) ;; custom) [[ -f "$POLICY_CUSTOM" ]] || die "Preset custom butuh $POLICY_CUSTOM" ;;
     *) die "Kebijakan tidak dikenal: $current (otomatis|seimbang|ketat|custom)" ;; esac
-  printf 'POLICY=%s\n' "$current" > "$POLICY_CONF"; chmod 0644 "$POLICY_CONF"
+  conf_set "$POLICY_CONF" POLICY "$current"
+}
+
+conf_set() { # conf_set <file> <KEY> <VALUE>  -> world-readable key=value file, other keys kept
+  local f="$1" k="$2" v="$3"
+  touch "$f"
+  { grep -v "^$k=" "$f" || true; printf '%s=%s\n' "$k" "$v"; } > "$f.tmp"
+  chmod 0644 "$f.tmp"; mv "$f.tmp" "$f"
 }
 
 apply_policy() {
   local name src
   name="$(env_value "$POLICY_CONF" POLICY)"
-  if [[ "$name" == custom ]]; then src="$POLICY_CUSTOM"; else src="$REPO_DIR/config/policies/$name.json"; fi
+  # After `otb github-key` (PUSH=1) the -push variant lets git push ask instead of deny.
+  local suffix=""
+  [[ "$(env_value "$POLICY_CONF" PUSH)" == 1 ]] && suffix="-push"
+  if [[ "$name" == custom ]]; then src="$POLICY_CUSTOM"; else src="$REPO_DIR/config/policies/$name$suffix.json"; fi
   [[ -f "$src" ]] || die "File kebijakan tidak ditemukan: $src"
   node_or_python_json_ok "$src" || die "$src bukan JSON yang valid."
   # Write in place (same inode): Docker mode bind-mounts this single file.

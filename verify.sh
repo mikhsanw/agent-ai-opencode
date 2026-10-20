@@ -132,12 +132,21 @@ if [[ $mode_a -eq 1 || $mode_b -eq 1 ]]; then
 fi
 if [[ -n "${cfg:-}" ]]; then
   policy_name="$(sed -n 's/^POLICY=//p' /etc/otb/policy.conf 2>/dev/null)"
-  python3 - "$cfg" <<'PY' && pass "Approval policy '${policy_name:-?}' active; hard blocks in place (git push, sudo, ssh, docker, outside project)" || fail "Managed permission policy NOT active or hard blocks missing"
+  push_flag="$(sed -n 's/^PUSH=//p' /etc/otb/policy.conf 2>/dev/null)"
+  OTB_PUSH="$push_flag" python3 - "$cfg" <<'PY' && pass "Approval policy '${policy_name:-?}' active; hard blocks in place ($([[ "$push_flag" == 1 ]] && echo "git push asks, force push" || echo "git push"), sudo, ssh, docker, outside project)" || fail "Managed permission policy NOT active or hard blocks missing"
 import json, sys
 p = json.loads(sys.argv[1]).get("permission", {})
 b = p.get("bash", {})
-must_deny = ["git push *", "git push", "sudo *", "ssh *", "scp *", "docker *", "systemctl *", "crontab *", "git config *"]
-ok = isinstance(b, dict) and all(b.get(k) == "deny" for k in must_deny) and p.get("external_directory") == "deny" \
+import os
+push = os.environ.get("OTB_PUSH") == "1"
+must_deny = ["sudo *", "ssh *", "scp *", "docker *", "systemctl *", "crontab *", "git config *"]
+if push:   # otb github-key: pushing asks, history-destroying pushes stay blocked
+    must_deny += ["git push *--force*", "git push -f *", "git push *--delete*"]
+    push_ok = b.get("git push *") == "ask"
+else:
+    must_deny += ["git push *", "git push"]
+    push_ok = True
+ok = isinstance(b, dict) and push_ok and all(b.get(k) == "deny" for k in must_deny) and p.get("external_directory") == "deny" \
      and isinstance(p.get("edit"), dict) and p["edit"].get("*opencode.json") == "deny"
 sys.exit(0 if ok else 1)
 PY
