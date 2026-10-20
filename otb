@@ -45,10 +45,25 @@ cmd_version() {
 cmd_status() {
   cmd_version
   echo
+  local recent
   if [[ "$MODE" == "systemd" ]]; then
     systemctl --no-pager --lines=0 status otb-agent.service otb-bot.service 2>/dev/null | grep -E '●|Active:' || true
+    recent="$(journalctl -u otb-bot.service --since '-3 min' --no-pager 2>/dev/null || true)"
   else
     "${COMPOSE[@]}" ps --format 'table {{.Name}}\t{{.Status}}'
+    recent="$(docker logs --since 3m otb-bot 2>&1 || true)"
+  fi
+  if grep -q "409: Conflict" <<<"$recent"; then
+    cat <<'EOF'
+
+MASALAH: token bot ini sedang dipakai program lain (Telegram 409 Conflict).
+Hanya satu program yang boleh memakai satu token. Kemungkinan pelakunya:
+  - opencode-telegram-bot asli yang pernah dijalankan (di VPS ini atau di laptop);
+  - instalasi otb lain (mode docker, atau VPS lain) dengan token yang sama.
+Cek di VPS ini:  ps aux | grep -E "opencode-telegram|cli.js start" | grep -v grep
+Paling pasti: di @BotFather pilih bot Anda -> API Token -> Revoke, lalu
+pasang token baru dengan: otb reconfigure
+EOF
   fi
 }
 
