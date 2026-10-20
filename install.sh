@@ -617,7 +617,16 @@ install_docker_mode() {
 # folder, so the bot opened sessions there and failed with "FileSystem.realPath ... ENOENT".
 # Point it back to "/" (OpenCode's own default) with OpenCode's database tool. Idempotent.
 repair_stale_test_project() {
-  local sql="UPDATE project SET worktree='/', vcs=NULL WHERE id='global' AND worktree LIKE '/srv/workspace/.otb-verify-%';"
+  # One statement per call: `opencode db` only runs the first statement it is given.
+  # FKs are enforced and cascade, so deleting a project or session removes its messages too.
+  local p="'/srv/workspace/.otb-verify-%'"
+  local stmts=(
+    "DELETE FROM session WHERE directory LIKE $p"
+    "DELETE FROM project_directory WHERE directory LIKE $p"
+    "DELETE FROM workspace WHERE directory LIKE $p"
+    "DELETE FROM project WHERE id <> 'global' AND worktree LIKE $p"
+    "UPDATE project SET worktree='/', vcs=NULL WHERE id='global' AND worktree LIKE $p"
+  )
   # The bot also remembers the project/session it last used (settings.json); drop entries
   # that point into the deleted test folder so it stops reattaching to it on startup.
   local js='
@@ -630,12 +639,15 @@ repair_stale_test_project() {
       if (bad(s.currentSession?.directory)) { delete s.currentSession; changed = true; }
       if (changed) { fs.writeFileSync(f, JSON.stringify(s, null, 2)); console.log("repaired " + f); }
     }'
+  local q
   if [[ "$MODE" == "systemd" ]]; then
     systemctl stop otb-bot.service otb-agent.service 2>/dev/null || true
     if [[ -f /var/lib/otb-agent/.local/share/opencode/opencode.db ]]; then
-      (cd / && runuser -u otb-agent -- env HOME=/var/lib/otb-agent XDG_CONFIG_HOME="$ETC_DIR/agent-xdg" \
-        XDG_DATA_HOME=/var/lib/otb-agent/.local/share OPENCODE_DISABLE_DEFAULT_PLUGINS=1 \
-        "$OPT_DIR/agent/node_modules/.bin/opencode" db "$sql" >/dev/null 2>&1) || true
+      for q in "${stmts[@]}"; do
+        (cd / && runuser -u otb-agent -- env HOME=/var/lib/otb-agent XDG_CONFIG_HOME="$ETC_DIR/agent-xdg" \
+          XDG_DATA_HOME=/var/lib/otb-agent/.local/share OPENCODE_DISABLE_DEFAULT_PLUGINS=1 \
+          "$OPT_DIR/agent/node_modules/.bin/opencode" db "$q" >/dev/null 2>&1) || true
+      done
     fi
     if [[ -d /var/lib/otb-bot ]]; then
       (cd / && runuser -u otb-bot -- node -e "$js" /var/lib/otb-bot/settings.json /var/lib/otb-bot/settings.json.bak) || true
@@ -644,8 +656,10 @@ repair_stale_test_project() {
     local compose=(docker compose -f "$REPO_DIR/docker-compose.yml")
     "${compose[@]}" stop bot agent >/dev/null 2>&1 || true
     if docker volume inspect otb_agent-home >/dev/null 2>&1; then
-      "${compose[@]}" run --rm --no-deps -T -e OPENCODE_DISABLE_DEFAULT_PLUGINS=1 \
-        --entrypoint /opt/otb/agent/node_modules/.bin/opencode agent db "$sql" >/dev/null 2>&1 || true
+      for q in "${stmts[@]}"; do
+        "${compose[@]}" run --rm --no-deps -T -e OPENCODE_DISABLE_DEFAULT_PLUGINS=1 \
+          --entrypoint /opt/otb/agent/node_modules/.bin/opencode agent db "$q" >/dev/null 2>&1 || true
+      done
     fi
     if docker volume inspect otb_bot-data >/dev/null 2>&1; then
       "${compose[@]}" run --rm --no-deps -T --entrypoint node bot -e "$js" /data/settings.json /data/settings.json.bak || true
