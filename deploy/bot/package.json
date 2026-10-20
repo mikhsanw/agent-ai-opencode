@@ -1,0 +1,8 @@
+{
+  "name": "otb-bot-runtime",
+  "private": true,
+  "description": "Pinned opencode-telegram-bot runtime for the hardened bot setup",
+  "dependencies": {
+    "@grinev/opencode-telegram-bot": "0.26.5"
+  }
+}

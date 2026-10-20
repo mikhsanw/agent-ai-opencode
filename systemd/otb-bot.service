@@ -1,0 +1,66 @@
+# Telegram bot. Holds the Telegram token, never runs AI commands itself.
+[Unit]
+Description=OpenCode Telegram bot (sandboxed)
+Documentation=file:///opt/otb/README.md
+After=network-online.target otb-agent.service
+Wants=network-online.target
+Requires=otb-agent.service
+
+[Service]
+Type=simple
+User=otb-bot
+Group=otb-bot
+SupplementaryGroups=otb-ws
+EnvironmentFile=/etc/otb/bot.env
+Environment=HOME=/var/lib/otb-bot
+Environment=OPENCODE_TELEGRAM_HOME=/var/lib/otb-bot
+Environment=NODE_ENV=production
+WorkingDirectory=/var/lib/otb-bot
+ExecStart=/usr/bin/env node /opt/otb/bot/node_modules/@grinev/opencode-telegram-bot/dist/cli.js start
+Restart=on-failure
+RestartSec=5
+UMask=0077
+
+# --- Filesystem: workspace is read-only (browse and attach files only).
+StateDirectory=otb-bot
+StateDirectoryMode=0700
+ProtectSystem=strict
+ProtectHome=yes
+ReadOnlyPaths=/srv/workspace
+PrivateTmp=yes
+# The bot cannot start its own OpenCode (which would run outside the agent sandbox
+# and next to the Telegram token), and cannot see the agent's secrets.
+InaccessiblePaths=-/opt/otb/agent -/etc/otb/agent.env -/var/lib/otb-agent
+
+# --- Privileges.
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+RemoveIPC=yes
+KeyringMode=private
+
+# --- Kernel and devices.
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+
+# --- Resource limits.
+TasksMax=128
+MemoryMax=512M
+CPUQuota=50%
+
+[Install]
+WantedBy=multi-user.target

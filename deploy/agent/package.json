@@ -1,0 +1,8 @@
+{
+  "name": "otb-agent-runtime",
+  "private": true,
+  "description": "Pinned OpenCode runtime for the hardened bot setup",
+  "dependencies": {
+    "opencode-ai": "1.19.3"
+  }
+}

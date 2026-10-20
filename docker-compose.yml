@@ -1,0 +1,63 @@
+# Mode B (optional): same security model as Mode A, enforced by Docker.
+# Start with:  sudo ./install.sh --mode docker
+# No ports are published to the host; the bot reaches the agent on a private network.
+name: otb
+
+x-hardening: &hardening
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+  restart: unless-stopped
+  logging:
+    driver: json-file
+    options: { max-size: "10m", max-file: "5" }
+
+services:
+  agent:
+    <<: *hardening
+    build: { context: ., dockerfile: docker/agent.Dockerfile }
+    image: otb-agent:local
+    container_name: otb-agent
+    env_file: /etc/otb/agent.env
+    environment:
+      HOME: /home/agent
+      XDG_CONFIG_HOME: /etc/otb/agent-xdg
+      OPENCODE_DISABLE_PROJECT_CONFIG: "1"
+      OPENCODE_DISABLE_AUTOUPDATE: "1"
+    volumes:
+      - /srv/workspace:/srv/workspace
+      - agent-home:/home/agent
+      - /etc/otb/agent-dot-opencode:/home/agent/.opencode:ro   # blocks ~/.opencode/plugins
+      - /etc/opencode/opencode.json:/etc/opencode/opencode.json:ro
+      - /etc/otb/agent-xdg:/etc/otb/agent-xdg:ro
+    tmpfs: ["/tmp:size=512m,mode=1777"]
+    pids_limit: 512
+    mem_limit: 2g
+    cpus: 1.5
+    networks: [otb]
+
+  bot:
+    <<: *hardening
+    build: { context: ., dockerfile: docker/bot.Dockerfile }
+    image: otb-bot:local
+    container_name: otb-bot
+    depends_on: [agent]
+    env_file: /etc/otb/bot.env
+    environment:
+      OPENCODE_API_URL: http://agent:4096
+    group_add: ["10001"]   # read-only access to the workspace
+    volumes:
+      - /srv/workspace:/srv/workspace:ro
+      - bot-data:/data
+    tmpfs: ["/tmp:size=64m,mode=1777"]
+    pids_limit: 128
+    mem_limit: 512m
+    cpus: 0.5
+    networks: [otb]
+
+networks:
+  otb: {}
+
+volumes:
+  agent-home: {}
+  bot-data: {}

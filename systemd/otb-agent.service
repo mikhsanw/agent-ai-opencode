@@ -1,0 +1,73 @@
+# OpenCode server (the agent). Runs every shell command the AI issues,
+# so this unit is the real security boundary in Mode A.
+[Unit]
+Description=OpenCode agent server (sandboxed)
+Documentation=file:///opt/otb/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=otb-agent
+Group=otb-agent
+SupplementaryGroups=otb-ws
+EnvironmentFile=/etc/otb/agent.env
+Environment=HOME=/var/lib/otb-agent
+Environment=XDG_CONFIG_HOME=/etc/otb/agent-xdg
+Environment=XDG_DATA_HOME=/var/lib/otb-agent/.local/share
+Environment=XDG_CACHE_HOME=/var/lib/otb-agent/.cache
+Environment=XDG_STATE_HOME=/var/lib/otb-agent/.local/state
+Environment=OPENCODE_DISABLE_PROJECT_CONFIG=1
+Environment=OPENCODE_DISABLE_AUTOUPDATE=1
+WorkingDirectory=/srv/workspace
+ExecStart=/opt/otb/agent/node_modules/.bin/opencode serve --hostname 127.0.0.1 --port 4096
+Restart=on-failure
+RestartSec=5
+UMask=0027
+
+# --- Filesystem: everything read-only except the workspace and its own state.
+StateDirectory=otb-agent
+StateDirectoryMode=0700
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/srv/workspace
+# OpenCode auto-loads plugins from ~/.opencode/plugins. Mount it read-only so the
+# agent cannot plant a plugin that would run outside the approval system.
+ReadOnlyPaths=/var/lib/otb-agent/.opencode
+PrivateTmp=yes
+# The bot's secrets and code are invisible to the agent.
+InaccessiblePaths=-/etc/otb/bot.env -/var/lib/otb-bot -/opt/otb/bot
+
+# --- Privileges: no root, no capabilities, no way to regain them.
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+RemoveIPC=yes
+KeyringMode=private
+
+# --- Kernel and devices.
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+
+# --- Resource limits (stop runaway builds or fork bombs).
+TasksMax=512
+MemoryHigh=70%
+MemoryMax=80%
+CPUQuota=150%
+
+[Install]
+WantedBy=multi-user.target
