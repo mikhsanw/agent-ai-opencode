@@ -18,6 +18,8 @@ ETC_DIR=/etc/otb
 source "$REPO_DIR/lib/shares.sh"
 # shellcheck source=lib/safety.sh
 source "$REPO_DIR/lib/safety.sh"
+# shellcheck source=lib/projects.sh
+source "$REPO_DIR/lib/projects.sh"
 # The installer code is owned by root; without this, git refuses it for other users
 # ("dubious ownership"). Read-only use by non-root (otb version) is safe.
 repo_git() { git -c safe.directory="$REPO_DIR" -C "$REPO_DIR" "$@"; }
@@ -36,6 +38,8 @@ Pemakaian: otb <perintah>
   attach               buka TUI OpenCode yang terhubung ke agen (sesi yang sama dengan Telegram)
   policy [nama]        lihat/ganti persetujuan perintah: otomatis | seimbang | ketat | custom
   github-key [test|off] beri agen akses git push ke GitHub (setiap push tetap ditanya)
+  (tanpa argumen)      ringkasan status dan perintah penting
+  detect               cari proyek di server (Telegram: /akses_<proyek>)
   shares               daftar folder di luar workspace yang boleh diakses agen
   share <path> [--write]  izinkan agen membaca (atau --write: menulis, termasuk .env & database)
   unshare <path>       cabut akses agen ke folder itu
@@ -426,6 +430,96 @@ EOF
   safety_load; backup_restore "$p" "$f"
 }
 
+# ---------------------------------------------------------------- Telegram-managed projects
+tg_send() { # tg_send <text>  -> message to the allowed user (token read from bot.env, never on argv)
+  local token uid root
+  token="$(sed -n 's/^TELEGRAM_BOT_TOKEN=//p' /etc/otb/bot.env)"
+  uid="$(sed -n 's/^TELEGRAM_ALLOWED_USER_ID=//p' /etc/otb/bot.env)"
+  root="$(sed -n 's/^TELEGRAM_API_ROOT=//p' /etc/otb/bot.env)"; root="${root:-https://api.telegram.org}"
+  [[ -n "$token" && -n "$uid" ]] || return 0
+  printf 'url = "%s/bot%s/sendMessage"\n' "$root" "$token" \
+    | curl -sS --max-time 15 --config - --data-urlencode "chat_id=$uid" --data-urlencode "text=$1" >/dev/null 2>&1 || true
+}
+
+# Run by otb-requests.service (root) when the bot drops request files. Only slugs from
+# projects.conf are accepted; request files are read as data, never executed.
+cmd_handle_requests() {
+  local f line act slug path name changed=0 msgs=() done_msgs=()
+  shopt -s nullglob
+  for f in "$REQUESTS"/*.req; do
+    if [[ -L "$f" || ! -f "$f" ]]; then rm -f "$f"; continue; fi
+    line="$(head -c 64 "$f" | head -n1)"; rm -f "$f"
+    [[ "$line" =~ ^(akses|tutup)\ ([a-z0-9_]{1,26})$ ]] || continue
+    act="${BASH_REMATCH[1]}"; slug="${BASH_REMATCH[2]}"
+    path="$(project_path "$slug")"; name="$(basename "${path:-$slug}")"
+    if [[ -z "$path" || ! -d "$path" ]]; then msgs+=("❌ Proyek '$slug' tidak dikenal. Lihat /daftar_akses"); continue; fi
+    if [[ "$act" == akses ]]; then
+      if shares_list | grep -qx "rw $path"; then msgs+=("ℹ️ $name sudah terbuka untuk agen."); continue; fi
+      if ! (share_validate "$path") >/dev/null 2>&1; then msgs+=("❌ $name tidak boleh dibagikan."); continue; fi
+      { shares_list | grep -v " $path\$" || true; echo "rw $path"; } > "$SHARES_CONF.tmp"
+      project_set_state "$slug" shared
+      done_msgs+=("✅ Agen sekarang punya akses penuh ke $name ($path). Snapshot tiap 5 menit & backup database tiap jam aktif. Pilih proyeknya: /open")
+    else
+      if ! shares_list | grep -q " $path\$"; then msgs+=("ℹ️ $name memang belum terbuka."); continue; fi
+      { shares_list | grep -v " $path\$" || true; } > "$SHARES_CONF.tmp"
+      project_set_state "$slug" closed
+      done_msgs+=("🔒 Akses agen ke $name ditutup. Snapshot & backup lama tetap tersimpan.")
+    fi
+    chmod 0644 "$SHARES_CONF.tmp"; mv "$SHARES_CONF.tmp" "$SHARES_CONF"; changed=1
+  done
+  if [[ $changed -eq 1 ]]; then
+    if reapply; then msgs+=("${done_msgs[@]}")
+    else msgs+=("❌ Gagal menerapkan perubahan akses. Cek di server: otb verify"); fi
+  fi
+  local m; for m in "${msgs[@]}"; do tg_send "$m"; done
+}
+
+cmd_detect() {
+  local notify=0 slug state path
+  [[ "${1:-}" == --notify ]] && notify=1
+  [[ "$MODE" == systemd ]] || die "Hanya untuk mode systemd."
+  projects_sync
+  write_project_commands
+  if [[ "$CMDS_CHANGED" == 1 ]] && systemctl is-active --quiet otb-bot.service; then
+    systemctl restart otb-bot.service; sleep 8   # new /akses_ commands are loaded at bot start
+  fi
+  if [[ $notify -eq 1 ]]; then
+    while read -r slug state path; do
+      [[ "$state" == new ]] || continue
+      tg_send "📁 Proyek baru terdeteksi: $(basename "$path") ($path). Beri agen akses penuh: /akses_$slug  (tawaran ini hanya dikirim sekali; semua proyek: /daftar_akses)"
+      project_set_state "$slug" offered
+    done < <(projects_list)
+  else
+    echo "Proyek di server ini (✅ terbuka untuk agen):"
+    while read -r slug state path; do
+      printf '  %s %-28s %s\n' "$([[ $state == shared ]] && echo ✅ || echo ⬜)" "$(basename "$path")" "Telegram: /$([[ $state == shared ]] && echo tutup || echo akses)_$slug"
+    done < <(projects_list)
+  fi
+}
+
+cmd_summary() {
+  local model policy bot agent
+  model="$(sed -n 's/^OPENCODE_MODEL_PROVIDER=//p' /etc/otb/bot.env 2>/dev/null)/$(sed -n 's/^OPENCODE_MODEL_ID=//p' /etc/otb/bot.env 2>/dev/null)"
+  policy="$(sed -n 's/^POLICY=//p' /etc/otb/policy.conf 2>/dev/null)"
+  if [[ "$MODE" == systemd ]]; then
+    bot="$(systemctl is-active otb-bot.service 2>/dev/null)"; agent="$(systemctl is-active otb-agent.service 2>/dev/null)"
+  else
+    bot="$(docker inspect -f '{{.State.Status}}' otb-bot 2>/dev/null)"; agent="$(docker inspect -f '{{.State.Status}}' otb-agent 2>/dev/null)"
+  fi
+  echo "otb — agen OpenCode via Telegram (mode $MODE)"
+  echo "  Bot: ${bot:-?}   Agen: ${agent:-?}   Model: $model   Persetujuan: ${policy:-?}"
+  if [[ -s "$PROJECTS_CONF" ]]; then
+    printf '  Proyek:'; awk '{ n=$3; sub(/.*\//, "", n); printf "  %s %s", ($2 == "shared" ? "✅" : "⬜"), n }' "$PROJECTS_CONF"; echo
+  fi
+  cat <<'EOF'
+
+Dari Telegram:  /open  /daftar_akses  /akses_<proyek>  /tutup_<proyek>  /model
+Di server:      otb logs        otb restart     otb verify
+                otb snapshots <proyek>   otb restore <proyek> <id>   otb restore-db <proyek> <file>
+                otb help        (semua perintah)
+EOF
+}
+
 cmd_clone() {
   local url="${1:-}" name="${2:-}"
   [[ -n "$url" ]] || die "Pemakaian: otb clone <url> [nama-folder]"
@@ -485,6 +579,7 @@ EOF
     systemctl disable --now "$u.timer" >/dev/null 2>&1 || true
     rm -f "/etc/systemd/system/$u.timer" "/etc/systemd/system/$u.service"
   done
+  remove_project_units
   [[ -d "$SNAP_ROOT" || -d "$BACKUP_ROOT" ]] && log "Snapshot ($SNAP_ROOT) dan backup database ($BACKUP_ROOT) TIDAK dihapus; hapus manual jika sudah tidak perlu."
   if [[ "$MODE" == "systemd" ]]; then
     systemctl disable --now otb-bot.service otb-agent.service 2>/dev/null || true
@@ -504,7 +599,7 @@ EOF
   log "Uninstall selesai. Kode sumber installer tetap ada di $REPO_DIR."
 }
 
-cmd="${1:-help}"; shift || true
+cmd="${1:-summary}"; shift || true
 case "$cmd" in
   status) cmd_status ;;
   logs) need_root logs "$@"; cmd_logs "$@" ;;
@@ -512,6 +607,9 @@ case "$cmd" in
   verify) need_root verify; exec "$REPO_DIR/verify.sh" ;;
   clone) need_root clone "$@"; cmd_clone "$@" ;;
   attach) need_root attach; cmd_attach ;;
+  summary) need_root summary; cmd_summary ;;
+  detect) need_root detect "$@"; cmd_detect "$@" ;;
+  handle-requests) need_root handle-requests; cmd_handle_requests ;;
   shares) cmd_shares ;;
   snapshot) need_root snapshot "$@"; cmd_snapshot "$@" ;;
   snapshots) need_root snapshots "$@"; cmd_snapshots "$@" ;;

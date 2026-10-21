@@ -71,6 +71,8 @@ fi
 source "$REPO_DIR/lib/shares.sh"
 # shellcheck source=lib/safety.sh
 source "$REPO_DIR/lib/safety.sh"
+# shellcheck source=lib/projects.sh
+source "$REPO_DIR/lib/projects.sh"
 random_secret() { od -An -tx1 -N24 /dev/urandom | tr -d ' \n'; }
 
 env_value() { # env_value <file> <KEY>  -> value, empty if unset or commented out
@@ -118,9 +120,13 @@ mask() { local s="$1"; [[ ${#s} -le 8 ]] && { printf '****'; return; }; printf '
 
 # Telegram calls pass the token through curl's stdin config, never on the command line,
 # so it does not show up in `ps` for other users on the machine.
+# Telegram API root: OTB_TELEGRAM_API_ROOT (e.g. a reverse proxy where api.telegram.org is
+# blocked) is stored as the bot's TELEGRAM_API_ROOT so the bot and otb use it too.
+TG_API_ROOT="${OTB_TELEGRAM_API_ROOT:-$(env_value "$ETC_DIR/bot.env" TELEGRAM_API_ROOT)}"
+TG_API_ROOT="${TG_API_ROOT:-https://api.telegram.org}"
 tg_api() { # tg_api <token> <method> [curl args...]
   local token="$1" method="$2"; shift 2
-  printf 'url = "https://api.telegram.org/bot%s/%s"\n' "$token" "$method" \
+  printf 'url = "%s/bot%s/%s"\n' "$TG_API_ROOT" "$token" "$method" \
     | curl -sS --max-time 15 --config - "$@" 2>/dev/null
 }
 
@@ -142,7 +148,7 @@ provider_default_model() {
     anthropic) echo claude-sonnet-4-5 ;;
     openai) echo gpt-5 ;;
     openrouter) echo anthropic/claude-sonnet-4.5 ;;
-    opencode) echo big-pickle ;;
+    opencode) echo space-bunny-free ;;
     deepseek) echo deepseek-v4-pro ;;
     *) echo "" ;;
   esac
@@ -150,25 +156,10 @@ provider_default_model() {
 
 # --------------------------------------------------------------------------- mode
 choose_mode() {
-  local saved=""
-  [[ -f "$INSTALL_CONF" ]] && saved="$(env_value "$INSTALL_CONF" MODE)"
+  # systemd unless asked otherwise (--mode docker) or already installed in another mode.
   if [[ -z "$MODE" ]]; then
-    if [[ -n "$saved" ]]; then
-      MODE="$saved"
-    elif [[ $INTERACTIVE -eq 1 ]]; then
-      cat >/dev/tty <<'EOF'
-
-Pilih mode sandbox:
-  1) systemd  - tanpa tool tambahan, paling ringan (disarankan)
-  2) docker   - isolasi penuh di container (Docker dipasang otomatis di Ubuntu)
-EOF
-      case "$(ask "Mode" 1)" in
-        2|docker) MODE=docker ;;
-        *) MODE=systemd ;;
-      esac
-    else
-      MODE=systemd
-    fi
+    [[ -f "$INSTALL_CONF" ]] && MODE="$(env_value "$INSTALL_CONF" MODE)"
+    MODE="${MODE:-systemd}"
   fi
   [[ "$MODE" == "systemd" || "$MODE" == "docker" ]] || die "--mode harus 'systemd' atau 'docker'"
   log "Mode: $MODE"
@@ -327,6 +318,42 @@ install_shared_config() {
 }
 
 # --------------------------------------------------------------------------- wizard
+# The person who sends the next message to the bot becomes its only allowed user (after they
+# confirm the name). Old pending updates are skipped and the used ones are acknowledged, so the
+# bot does not later treat this message as a prompt.
+detect_telegram_user() { # detect_telegram_user <token>  -> prints the user id, or nothing
+  local token="$1" botname offset=0 resp parsed id first user t0
+  command -v node >/dev/null || return 0
+  systemctl is-active --quiet otb-bot.service 2>/dev/null && systemctl stop otb-bot.service
+  botname="$(tg_api "$token" getMe | tr -d ' ' | sed -n 's/.*"username":"\([^"]*\)".*/\1/p' || true)"
+  resp="$(tg_api "$token" getUpdates --data "offset=-1" --data "timeout=0" || true)"
+  offset="$(node -e 'try{const r=JSON.parse(require("fs").readFileSync(0,"utf8")).result||[];console.log(r.length?r[r.length-1].update_id+1:0)}catch{console.log(0)}' <<<"$resp")"
+  printf '\n\033[1m2. Akun Anda\033[0m\n  Kirim pesan apa saja ke @%s sekarang dari akun Telegram Anda…\n' "${botname:-bot-anda}" >/dev/tty
+  t0=$(date +%s)
+  while (( $(date +%s) - t0 < 180 )); do
+    resp="$(printf 'url = "%s/bot%s/getUpdates"\n' "$TG_API_ROOT" "$token" \
+      | curl -sS --max-time 30 --config - --data "offset=$offset" --data "timeout=20" 2>/dev/null || true)"
+    parsed="$(node -e '
+      try { const r = JSON.parse(require("fs").readFileSync(0, "utf8")).result || [];
+        let next = Number(process.argv[1]), hit = "";
+        for (const u of r) { next = u.update_id + 1; const m = u.message || u.edited_message;
+          if (!hit && m && m.from && !m.from.is_bot) hit = [m.from.id, m.from.first_name || "", m.from.last_name || "", m.from.username || ""].join("\t"); }
+        console.log(next + "\t" + hit);
+      } catch { console.log(process.argv[1] + "\t"); }' "$offset" <<<"$resp")"
+    offset="${parsed%%$'\t'*}"; parsed="${parsed#*$'\t'}"
+    [[ -n "$parsed" ]] || continue
+    IFS=$'\t' read -r id first last user <<<"$parsed"
+    tg_api "$token" getUpdates --data "offset=$offset" --data "timeout=0" >/dev/null || true   # acknowledge
+    if [[ "$(ask "  Terdeteksi: $first ${last:+$last }${user:+(@$user) }— ID $id. Ini Anda? (y/n)" y)" =~ ^[YyJj] ]]; then
+      tg_api "$token" sendMessage --data-urlencode "chat_id=$id" \
+        --data-urlencode "text=👋 Akun Anda terdaftar sebagai satu-satunya pengguna bot ini. Lanjutkan instalasi di terminal." >/dev/null || true
+      printf '%s' "$id"; return 0
+    fi
+    printf '  Baik, kirim pesan lagi dari akun yang benar…\n' >/dev/tty
+  done
+  printf '  Tidak ada pesan masuk dalam 3 menit.\n' >/dev/tty
+}
+
 configure_telegram() {
   local bot="$ETC_DIR/bot.env" token uid resp username
   token="$(env_value "$bot" TELEGRAM_BOT_TOKEN)"
@@ -335,7 +362,7 @@ configure_telegram() {
   [[ -n "${OTB_TELEGRAM_USER_ID:-}" ]] && uid="$OTB_TELEGRAM_USER_ID"
 
   if [[ -z "$token" || $RECONFIGURE -eq 1 ]] && [[ $INTERACTIVE -eq 1 ]]; then
-    printf '\n\033[1mTelegram\033[0m\n  Buat bot di @BotFather (/newbot), lalu salin tokennya.\n' >/dev/tty
+    printf '\n\033[1m1. Bot Telegram\033[0m\n  Buat bot di @BotFather (/newbot), lalu salin tokennya.\n' >/dev/tty
     [[ -n "$token" ]] && printf '  Token saat ini: %s (Enter untuk tetap)\n' "$(mask "$token")" >/dev/tty
     while :; do
       local input; input="$(ask_secret "  Token bot")"
@@ -344,7 +371,7 @@ configure_telegram() {
         printf '  Format token tidak valid (contoh: 123456789:AA...).\n' >/dev/tty; continue
       fi
       if [[ $SKIP_TG_CHECK -eq 0 ]]; then
-        resp="$(tg_api "$input" getMe || true)"
+        resp="$(tg_api "$input" getMe | tr -d ' ' || true)"
         if [[ "$resp" == *'"ok":true'* ]]; then
           username="$(sed -n 's/.*"username":"\([^"]*\)".*/\1/p' <<<"$resp")"
           printf '  \033[32m✓\033[0m Terhubung ke @%s\n' "$username" >/dev/tty
@@ -359,11 +386,18 @@ configure_telegram() {
   fi
 
   if [[ -z "$uid" || $RECONFIGURE -eq 1 ]] && [[ $INTERACTIVE -eq 1 ]]; then
-    printf '  User ID Telegram Anda: kirim pesan ke @userinfobot untuk melihatnya.\n' >/dev/tty
-    while :; do
-      local input; input="$(ask "  User ID" "$uid")"
-      [[ "$input" =~ ^[0-9]{3,}$ ]] && { uid="$input"; break; }
-      printf '  User ID harus berupa angka.\n' >/dev/tty
+    local detected=""
+    if [[ $SKIP_TG_CHECK -eq 0 ]]; then
+      if [[ -n "$uid" ]]; then
+        [[ "$(ask "  Akun Telegram yang diizinkan: ID $uid. Ganti? (y/n)" n)" =~ ^[YyJj] ]] && detected="$(detect_telegram_user "$token")"
+        [[ -z "$detected" ]] || uid="$detected"
+      else
+        detected="$(detect_telegram_user "$token")"; [[ -n "$detected" ]] && uid="$detected"
+      fi
+    fi
+    while [[ ! "$uid" =~ ^[0-9]{3,}$ ]]; do
+      printf '  Isi manual: kirim pesan ke @userinfobot untuk melihat user ID Anda.\n' >/dev/tty
+      uid="$(ask "  User ID" "")"
     done
   fi
 
@@ -371,11 +405,13 @@ configure_telegram() {
   [[ "$token" =~ ^[0-9]+:[A-Za-z0-9_-]{30,}$ ]] || die "Format token bot Telegram tidak valid."
   [[ "$uid" =~ ^[0-9]{3,}$ ]] || die "User ID Telegram belum diisi atau bukan angka (OTB_TELEGRAM_USER_ID)."
   if [[ $INTERACTIVE -eq 0 && $SKIP_TG_CHECK -eq 0 ]]; then
-    resp="$(tg_api "$token" getMe || true)"
+    resp="$(tg_api "$token" getMe | tr -d ' ' || true)"
     [[ "$resp" == *'"ok":false'* ]] && die "Telegram menolak token bot."
   fi
   set_env "$bot" TELEGRAM_BOT_TOKEN "$token"
   set_env "$bot" TELEGRAM_ALLOWED_USER_ID "$uid"
+  [[ -n "${OTB_TELEGRAM_API_ROOT:-}" ]] && set_env "$bot" TELEGRAM_API_ROOT "$OTB_TELEGRAM_API_ROOT"
+  return 0
 }
 
 # Interactive picker over tab-separated rows. Prints the chosen first column.
@@ -454,6 +490,19 @@ install_catalog_helper() {
   install -m 0644 -o root -g root "$REPO_DIR/lib/catalog.mjs" "$OPT_DIR/catalog.mjs"
 }
 
+# Default Zen model: space-bunny-free (zero retention, no training, per OpenCode's Zen docs);
+# falls back to the catalog's default if it ever disappears.
+ZEN_DEFAULT_MODEL="${OTB_ZEN_DEFAULT_MODEL:-space-bunny-free}"
+zen_default_model() { # zen_default_model <api-key>
+  local models
+  models="$(export OPENCODE_API_KEY="$1"; CATALOG_KEY_ENV=OPENCODE_API_KEY catalog models opencode || true)"
+  if [[ -z "$models" ]] || awk -F'\t' -v m="$ZEN_DEFAULT_MODEL" '$1 == m { f = 1 } END { exit !f }' <<<"$models"; then
+    printf '%s' "$ZEN_DEFAULT_MODEL"; return 0
+  fi
+  warn "Model $ZEN_DEFAULT_MODEL tidak ada lagi di katalog Zen; memakai default katalog."
+  awk -F'\t' '$4 == 1 { print $1; exit }' <<<"$models"
+}
+
 configure_model() {
   local bot="$ETC_DIR/bot.env" agent="$ETC_DIR/agent.env"
   local provider model key_env key cur_provider providers="" models="" envs pick
@@ -465,6 +514,31 @@ configure_model() {
   [[ -z "${OTB_PROVIDER:-}" && $ask_all -eq 0 && -z "$provider" ]] && provider=opencode
 
   install_catalog_helper
+  # Simple path: OpenCode Zen with its key only; the model can be changed later with /model.
+  if [[ $ask_all -eq 1 && ( -z "$cur_provider" || "$cur_provider" == opencode ) && -z "${OTB_PROVIDER:-}" ]]; then
+    local zkey cur_key; cur_key="$(env_value "$agent" OPENCODE_API_KEY)"
+    printf '\n\033[1m3. Model AI\033[0m — OpenCode Zen: satu API key untuk banyak model (Claude, GPT, Gemini, DeepSeek…)\n' >/dev/tty
+    printf '  Buat key di https://opencode.ai/auth (key khusus VPS ini, pasang batas pemakaian).\n' >/dev/tty
+    if [[ -n "$cur_key" ]]; then
+      zkey="$(ask_secret "  API key ($(mask "$cur_key"); Enter = tetap, ketik lain = provider lain)")"
+      [[ -z "$zkey" ]] && zkey="$cur_key"
+    else
+      zkey="$(ask_secret "  API key (ketik lain = provider lain)")"
+    fi
+    if [[ -n "$zkey" && "$zkey" != lain ]]; then
+      provider=opencode key_env=OPENCODE_API_KEY key="$zkey"
+      if [[ "$cur_provider" != opencode || -z "$model" ]]; then
+        model="$(zen_default_model "$key")"
+      fi
+      set_env "$bot" OPENCODE_MODEL_PROVIDER "$provider"
+      set_env "$bot" OPENCODE_MODEL_ID "$model"
+      set_env "$agent" "$key_env" "$key"
+      log "Model: $provider/$model (ganti kapan saja di Telegram: /model)"
+      printf '  Rekomendasi lain: deepseek-v4.1-flash-free (gratis, lebih cepat; kebijakan datanya belum jelas,\n  cek https://opencode.ai/docs/zen sebelum dipakai untuk data sekolah).\n' >/dev/tty
+      return 0
+    fi
+    provider=""
+  fi
   if [[ $ask_all -eq 1 ]]; then
     printf '\n\033[1mModel AI\033[0m\n  Membaca katalog provider dari OpenCode…\n' >/dev/tty
     providers="$(catalog providers || true)"
@@ -534,8 +608,11 @@ configure_model() {
       model="$(ask "  ID model" "${def_model:-$(provider_default_model "$provider")}")"
     fi
   elif [[ -z "$model" ]]; then
-    model="$(awk -F'\t' '$4 == 1 { print $1; exit }' <<<"$models")"
-    [[ -n "$model" ]] || model="$(provider_default_model "$provider")"
+    if [[ "$provider" == opencode ]]; then model="$(zen_default_model "$key")"
+    else
+      model="$(awk -F'\t' '$4 == 1 { print $1; exit }' <<<"$models")"
+      [[ -n "$model" ]] || model="$(provider_default_model "$provider")"
+    fi
   fi
   [[ -n "$model" ]] || die "Model belum diisi (OTB_MODEL)."
 
@@ -554,28 +631,13 @@ POLICY_CONF="$ETC_DIR/policy.conf"
 POLICY_CUSTOM="$ETC_DIR/policy-custom.json"
 
 choose_policy() {
-  local current="" choice
+  local current=""
   [[ -f "$POLICY_CONF" ]] && current="$(env_value "$POLICY_CONF" POLICY)"
+  # No question: "penuh" when the agent works on production folders (safety nets cover it),
+  # "otomatis" otherwise. Change any time with: otb policy <name>
   local fallback=otomatis
   [[ -n "$(rw_shares)" ]] && fallback=penuh
   current="${OTB_POLICY:-${current:-$fallback}}"
-  if [[ $INTERACTIVE -eq 1 && ( ! -f "$POLICY_CONF" || $RECONFIGURE -eq 1 ) ]]; then
-    local def=1
-    case "$current" in seimbang) def=2 ;; ketat) def=3 ;; penuh) def=4 ;; custom) def=5 ;; esac
-    cat >/dev/tty <<'EOF'
-
-Persetujuan perintah (bisa diganti kapan saja: otb policy)
-  1) otomatis  - jalan sendiri; hanya yang penting ditanya (hapus file, reset git,
-                 akses jaringan, ubah database, kill proses)
-  2) seimbang  - perintah baca & build/test umum jalan sendiri; lainnya ditanya
-  3) ketat     - hampir semua perintah ditanya
-  4) penuh     - tidak ada yang ditanya (kecuali git push); pengamannya snapshot file
-                 tiap 5 menit dan backup database tiap jam (otomatis untuk folder --write)
-EOF
-    [[ -f "$POLICY_CUSTOM" ]] && printf '  5) custom    - %s\n' "$POLICY_CUSTOM" >/dev/tty
-    choice="$(ask "  Pilih" "$def")"
-    case "$choice" in 2|seimbang) current=seimbang ;; 3|ketat) current=ketat ;; 4|penuh) current=penuh ;; 5|custom) current=custom ;; 1|otomatis) current=otomatis ;; *) current=otomatis ;; esac
-  fi
   case "$current" in otomatis|seimbang|ketat|penuh) ;; custom) [[ -f "$POLICY_CUSTOM" ]] || die "Preset custom butuh $POLICY_CUSTOM" ;;
     *) die "Kebijakan tidak dikenal: $current (otomatis|seimbang|ketat|penuh|custom)" ;; esac
   conf_set "$POLICY_CONF" POLICY "$current"
@@ -622,16 +684,8 @@ node_or_python_json_ok() {
   else return 0; fi
 }
 
-choose_harden_host() {
-  [[ -n "$HARDEN_HOST" ]] && return 0
-  # Only ask once; later runs keep the earlier answer (use --harden-host to apply later).
-  if [[ -f "$INSTALL_CONF" ]] && grep -q '^HARDEN_ASKED=1' "$INSTALL_CONF"; then HARDEN_HOST=0; return 0; fi
-  if [[ $INTERACTIVE -eq 1 ]] && ! [[ -f /etc/ssh/sshd_config.d/10-otb-hardening.conf ]]; then
-    printf '\n' >/dev/tty
-    if ask_yes_no "Pasang firewall (ufw) dan SSH key-only? Rencananya ditampilkan dulu" n; then HARDEN_HOST=1; else HARDEN_HOST=0; fi
-  else
-    HARDEN_HOST=0
-  fi
+choose_harden_host() { # only on request (--harden-host); a hint is printed at the end otherwise
+  [[ -n "$HARDEN_HOST" ]] || HARDEN_HOST=0
 }
 
 # --------------------------------------------------------------------------- Mode A
@@ -815,12 +869,12 @@ notify_telegram() {
   local token uid resp username
   token="$(env_value "$ETC_DIR/bot.env" TELEGRAM_BOT_TOKEN)"
   uid="$(env_value "$ETC_DIR/bot.env" TELEGRAM_ALLOWED_USER_ID)"
-  username="$(tg_api "$token" getMe | sed -n 's/.*"username":"\([^"]*\)".*/\1/p' || true)"
+  username="$(tg_api "$token" getMe | tr -d ' ' | sed -n 's/.*"username":"\([^"]*\)".*/\1/p' || true)"
   resp="$(tg_api "$token" sendMessage --data-urlencode "chat_id=$uid" \
-    --data-urlencode "text=✅ Bot OpenCode aktif di $(hostname) (mode $MODE). Kirim /start untuk mulai." || true)"
+    --data-urlencode "text=✅ Bot OpenCode aktif di $(hostname) (mode $MODE). Kirim /start untuk mulai." | tr -d ' ' || true)"
   if [[ "$resp" == *'"ok":true'* ]]; then
     ok "Pesan uji terkirim ke Telegram Anda."
-  elif [[ "$resp" == *"initiate"* || "$resp" == *"chat not found"* ]]; then
+  elif [[ "$resp" == *"initiate"* || "$resp" == *"chatnotfound"* ]]; then
     warn "Buka t.me/${username:-bot-anda} dan tekan Start; bot belum boleh mengirim pesan pertama."
   else
     warn "Pesan uji ke Telegram gagal dikirim. Cek: otb logs bot"
@@ -914,20 +968,44 @@ setup_safety_nets() {
   done < <(rw_shares)
 }
 
+# Telegram-managed projects (lib/projects.sh): registry, /akses_ /tutup_ commands, units.
+setup_projects() {
+  local p slug
+  [[ "$MODE" == systemd ]] || return 0
+  projects_sync
+  for p in ${DECLINED_PROJECTS:-}; do
+    slug="$(awk -v p="$p" '$3 == p { print $1 }' "$PROJECTS_CONF")"
+    [[ -n "$slug" ]] && project_set_state "$slug" offered
+  done
+  write_project_commands
+  install_project_units
+}
+
 # Option A: repositories to clone into the workspace right away (more later: otb clone <url>).
 clone_repos() {
   local urls="${OTB_CLONE:-}" u name
-  if [[ -z "$urls" && $INTERACTIVE -eq 1 && ( ! -f "$INSTALL_CONF.cloned" || $RECONFIGURE -eq 1 ) ]]; then
-    printf '\n\033[1mRepo untuk workspace\033[0m (opsional; agen bekerja di salinan ini)\n' >/dev/tty
-    urls="$(ask "  URL git, pisahkan dengan spasi (Enter untuk lewati)" "")"
-  fi
-  touch "$INSTALL_CONF.cloned"
   for u in $urls; do
     name="$(basename "$u")"; name="${name%.git}"
     if [[ -d "$WORKSPACE/$name" ]]; then log "$WORKSPACE/$name sudah ada; dilewati."; continue; fi
     "$REPO_DIR/otb" clone "$u" >/dev/null 2>&1 && ok "Di-clone: $WORKSPACE/$name" \
       || warn "Gagal clone $u (repo privat? jalankan dulu: otb github-key, lalu otb clone $u)"
   done
+}
+
+print_summary() {
+  local shared offered
+  shared="$(awk '$2 == "shared" { n++ } END { print n + 0 }' "$PROJECTS_CONF" 2>/dev/null || echo 0)"
+  offered="$(awk '$2 != "shared" { n++ } END { print n + 0 }' "$PROJECTS_CONF" 2>/dev/null || echo 0)"
+  cat >&2 <<EOF
+
+$(printf '\033[1;32m')Selesai.$(printf '\033[0m') Lanjutkan dari Telegram:
+  /open            pilih proyek, lalu kirim tugas
+  /daftar_akses    proyek yang bisa diakses agen ($shared terbuka, $offered tertutup)
+  /model           ganti model AI
+Di server:  otb  (ringkasan & perintah penting)
+EOF
+  [[ "$HARDEN_HOST" == 1 ]] || ufw status 2>/dev/null | grep -q "Status: active" \
+    || printf '  Saran: aktifkan firewall & SSH key-only dengan: sudo %s/install.sh --harden-host\n' "$REPO_DIR" >&2
 }
 
 # --------------------------------------------------------------------------- main
@@ -943,6 +1021,7 @@ main() {
   configure_shares
   apply_shares
   setup_safety_nets
+  setup_projects
   write_agent_gitconfig
   choose_policy
   apply_policy
@@ -967,17 +1046,9 @@ main() {
   fi
   clone_repos
   notify_telegram
-  cat >&2 <<EOF
-
-$(printf '\033[1;32m')Selesai.$(printf '\033[0m') Perintah berguna:
-  otb status        status layanan
-  otb logs bot      log bot (atau: otb logs agent)
-  otb verify        uji keamanan
-  otb reconfigure   ganti token / model / API key
-  otb update        perbarui ke rilis terbaru
-  otb shares        folder di luar workspace yang boleh diakses agen
-Workspace proyek: $WORKSPACE  (clone repo: otb clone <url>)
-EOF
+  # Projects not decided yet (e.g. after an update) are offered in Telegram right away.
+  [[ "$MODE" == systemd && $SKIP_TG_CHECK -eq 0 ]] && "$REPO_DIR/otb" detect --notify >/dev/null 2>&1 || true
+  print_summary
 }
 
 main

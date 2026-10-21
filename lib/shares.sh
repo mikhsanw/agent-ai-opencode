@@ -1,4 +1,5 @@
 # shellcheck shell=bash
+# shellcheck disable=SC2034  # CMDS_CHANGED / DECLINED_PROJECTS are read by the caller
 # Folders outside /srv/workspace that the agent may use (e.g. a production Laravel app).
 # Sourced by install.sh; relies on its helpers: log, ok, warn, die, ask, apt_install,
 # env_value, set_env, ETC_DIR, MODE, INTERACTIVE, RECONFIGURE.
@@ -93,30 +94,24 @@ configure_shares() {
   fi
   [[ $INTERACTIVE -eq 1 ]] || return 0
   [[ -f "$SHARES_CONF" && $RECONFIGURE -eq 0 ]] && return 0
-
-  printf '\n\033[1mFolder di luar workspace\033[0m (opsional, mis. aplikasi produksi)\n' >/dev/tty
-  if [[ -s "$SHARES_CONF" ]]; then
-    printf '  Saat ini:\n' >/dev/tty; shares_list | sed 's/^/    /' >/dev/tty
-    [[ "$(ask "  Ubah daftar ini? (y/n)" n)" =~ ^[YyJj] ]] || return 0
-  fi
-  while :; do
-    input="$(ask "  Path folder (Enter untuk selesai)" "")"
-    [[ -z "$input" ]] && break
-    if ! real="$( (share_validate "$input") 2>&1 )"; then
-      printf '  %s\n' "$(sed 's/\x1b\[[0-9;]*m//g; s/^\[otb\] GAGAL: //' <<<"$real")" >/dev/tty; continue
-    fi
-    printf '  Akses untuk %s:\n    1) baca saja\n    2) baca-tulis, termasuk .env dan database (website produksi!)\n' "$real" >/dev/tty
-    case "$(ask "  Pilih" 1)" in 2) mode=rw ;; *) mode=ro ;; esac
-    if [[ "$mode" == rw ]]; then
-      if ! git -c safe.directory="$real" -C "$real" rev-parse --git-dir >/dev/null 2>&1; then
-        printf '  \033[33mPERINGATAN:\033[0m %s bukan repo git, jadi perubahan agen tidak bisa dilihat/dibatalkan.\n' "$real" >/dev/tty
-        [[ "$(ask "  Tetap beri akses tulis? (y/n)" n)" =~ ^[YyJj] ]] || mode=ro
-      fi
-      printf '  Pastikan database punya backup rutin sebelum agen memakainya.\n' >/dev/tty
-    fi
-    lines+="$mode $real"$'\n'
+  touch "$SHARES_CONF"; chmod 0644 "$SHARES_CONF"
+  # Ask once about the projects found on this server; later ones are offered in Telegram.
+  local found=() p kind
+  mapfile -t found < <(detect_projects | while read -r p; do shares_list | grep -q " $p\$" || echo "$p"; done)
+  [[ ${#found[@]} -gt 0 ]] || return 0
+  printf '\n\033[1m4. Proyek di server ini\033[0m\n' >/dev/tty
+  for p in "${found[@]}"; do
+    kind=""; [[ -f "$p/artisan" ]] && kind="Laravel"; [[ -z "$kind" && -f "$p/package.json" ]] && kind="Node"
+    db_info "$p" 2>/dev/null && [[ -f "$p/.env" ]] && kind+="${kind:+, }${DB_CONNECTION}"
+    printf '  %s%s\n' "$p" "${kind:+  ($kind)}" >/dev/tty
   done
-  printf '%s' "$lines" > "$SHARES_CONF"; chmod 0644 "$SHARES_CONF"
+  printf '  Akses penuh = agen bisa mengubah file, .env, dan database. Pengaman: snapshot file tiap\n  5 menit dan backup database tiap jam. Bisa dibuka/ditutup kapan saja dari Telegram.\n' >/dev/tty
+  if [[ "$(ask "  Beri agen akses penuh ke proyek di atas? (y/n)" y)" =~ ^[YyJj] ]]; then
+    for p in "${found[@]}"; do echo "rw $p" >> "$SHARES_CONF"; done
+  else
+    printf '  Baik. Buka nanti dari Telegram: /daftar_akses\n' >/dev/tty
+    DECLINED_PROJECTS="${found[*]}"
+  fi
 }
 
 # Applies shares.conf: ACLs, systemd drop-ins, bot browse roots, git safe.directory.
