@@ -631,16 +631,23 @@ POLICY_CONF="$ETC_DIR/policy.conf"
 POLICY_CUSTOM="$ETC_DIR/policy-custom.json"
 
 choose_policy() {
-  local current=""
-  [[ -f "$POLICY_CONF" ]] && current="$(env_value "$POLICY_CONF" POLICY)"
+  local current="" auto=""
+  if [[ -f "$POLICY_CONF" ]]; then
+    current="$(env_value "$POLICY_CONF" POLICY)"; auto="$(env_value "$POLICY_CONF" POLICY_AUTO)"
+  fi
   # No question: "penuh" when the agent works on production folders (safety nets cover it),
-  # "otomatis" otherwise. Change any time with: otb policy <name>
+  # "otomatis" otherwise. Re-evaluated on every run (e.g. after a new project was shared)
+  # unless the preset was chosen by hand (otb policy <name> / OTB_POLICY).
   local fallback=otomatis
   [[ -n "$(rw_shares)" ]] && fallback=penuh
-  current="${OTB_POLICY:-${current:-$fallback}}"
+  # older installs have no POLICY_AUTO: treat the two automatic presets as automatic
+  [[ -z "$auto" ]] && { [[ -z "$current" || "$current" == otomatis || "$current" == penuh ]] && auto=1 || auto=0; }
+  if [[ -n "${OTB_POLICY:-}" ]]; then current="$OTB_POLICY"; auto=0
+  elif [[ "$auto" == 1 ]]; then current="$fallback"; fi
   case "$current" in otomatis|seimbang|ketat|penuh) ;; custom) [[ -f "$POLICY_CUSTOM" ]] || die "Preset custom butuh $POLICY_CUSTOM" ;;
     *) die "Kebijakan tidak dikenal: $current (otomatis|seimbang|ketat|penuh|custom)" ;; esac
   conf_set "$POLICY_CONF" POLICY "$current"
+  conf_set "$POLICY_CONF" POLICY_AUTO "$auto"
 }
 
 conf_set() { # conf_set <file> <KEY> <VALUE>  -> world-readable key=value file, other keys kept
@@ -864,6 +871,14 @@ PY
   fi
 }
 
+welcome_text() {
+  local list
+  list="$(awk '$2 == "shared" { n = $3; sub(/.*\//, "", n); printf "\n• %s", n }' "$PROJECTS_CONF" 2>/dev/null)"
+  printf '✅ Bot OpenCode aktif di %s (mode %s).\n' "$(hostname)" "$MODE"
+  if [[ -n "$list" ]]; then printf '\nProyek yang bisa dikerjakan agen:%s\n\nPilih dengan /open, lalu kirim tugas.' "$list"
+  else printf '\nBelum ada proyek di server. Pilih /open → workspace, lalu minta: clone <url-git>'; fi
+}
+
 notify_telegram() {
   [[ $SKIP_TG_CHECK -eq 1 ]] && return 0
   local token uid resp username
@@ -871,7 +886,7 @@ notify_telegram() {
   uid="$(env_value "$ETC_DIR/bot.env" TELEGRAM_ALLOWED_USER_ID)"
   username="$(tg_api "$token" getMe | tr -d ' ' | sed -n 's/.*"username":"\([^"]*\)".*/\1/p' || true)"
   resp="$(tg_api "$token" sendMessage --data-urlencode "chat_id=$uid" \
-    --data-urlencode "text=✅ Bot OpenCode aktif di $(hostname) (mode $MODE). Kirim /start untuk mulai." | tr -d ' ' || true)"
+    --data-urlencode "text=$(welcome_text)" | tr -d ' ' || true)"
   if [[ "$resp" == *'"ok":true'* ]]; then
     ok "Pesan uji terkirim ke Telegram Anda."
   elif [[ "$resp" == *"initiate"* || "$resp" == *"chatnotfound"* ]]; then
@@ -968,16 +983,9 @@ setup_safety_nets() {
   done < <(rw_shares)
 }
 
-# Telegram-managed projects (lib/projects.sh): registry, /akses_ /tutup_ commands, units.
+# Hourly detection of new projects (lib/projects.sh); removes the old /akses_ commands.
 setup_projects() {
-  local p slug
   [[ "$MODE" == systemd ]] || return 0
-  projects_sync
-  for p in ${DECLINED_PROJECTS:-}; do
-    slug="$(awk -v p="$p" '$3 == p { print $1 }' "$PROJECTS_CONF")"
-    [[ -n "$slug" ]] && project_set_state "$slug" offered
-  done
-  write_project_commands
   install_project_units
 }
 
@@ -993,14 +1001,13 @@ clone_repos() {
 }
 
 print_summary() {
-  local shared offered
-  shared="$(awk '$2 == "shared" { n++ } END { print n + 0 }' "$PROJECTS_CONF" 2>/dev/null || echo 0)"
-  offered="$(awk '$2 != "shared" { n++ } END { print n + 0 }' "$PROJECTS_CONF" 2>/dev/null || echo 0)"
+  local n
+  n="$(awk '$2 == "shared" { c++ } END { print c + 0 }' "$PROJECTS_CONF" 2>/dev/null || echo 0)"
   cat >&2 <<EOF
 
 $(printf '\033[1;32m')Selesai.$(printf '\033[0m') Lanjutkan dari Telegram:
-  /open            pilih proyek, lalu kirim tugas
-  /daftar_akses    proyek yang bisa diakses agen ($shared terbuka, $offered tertutup)
+  /open            pilih proyek ($n proyek bisa dikerjakan agen), lalu kirim tugas
+                   repo baru: /open workspace, lalu minta "clone <url-git>"
   /model           ganti model AI
 Di server:  otb  (ringkasan & perintah penting)
 EOF
@@ -1046,8 +1053,6 @@ main() {
   fi
   clone_repos
   notify_telegram
-  # Projects not decided yet (e.g. after an update) are offered in Telegram right away.
-  [[ "$MODE" == systemd && $SKIP_TG_CHECK -eq 0 ]] && "$REPO_DIR/otb" detect --notify >/dev/null 2>&1 || true
   print_summary
 }
 

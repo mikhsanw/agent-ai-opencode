@@ -1,5 +1,4 @@
 # shellcheck shell=bash
-# shellcheck disable=SC2034  # CMDS_CHANGED / DECLINED_PROJECTS are read by the caller
 # Folders outside /srv/workspace that the agent may use (e.g. a production Laravel app).
 # Sourced by install.sh; relies on its helpers: log, ok, warn, die, ask, apt_install,
 # env_value, set_env, ETC_DIR, MODE, INTERACTIVE, RECONFIGURE.
@@ -81,7 +80,7 @@ configure_shares() {
     [[ -s "$SHARES_CONF" ]] && warn "Berbagi folder hanya didukung di mode systemd; $SHARES_CONF diabaikan."
     return 0
   }
-  # Non-interactive: OTB_SHARES="rw:/home/ubuntu/web-sekolah ro:/var/www/lain"
+  # Extra/explicit shares: OTB_SHARES="rw:/home/ubuntu/web-sekolah ro:/var/www/lain"
   if [[ -n "${OTB_SHARES:-}" ]]; then
     for input in $OTB_SHARES; do
       mode="${input%%:*}"; p="${input#*:}"
@@ -90,28 +89,17 @@ configure_shares() {
       lines+="$mode $real"$'\n'
     done
     printf '%s' "$lines" > "$SHARES_CONF"; chmod 0644 "$SHARES_CONF"
-    return 0
   fi
-  [[ $INTERACTIVE -eq 1 ]] || return 0
-  [[ -f "$SHARES_CONF" && $RECONFIGURE -eq 0 ]] && return 0
-  touch "$SHARES_CONF"; chmod 0644 "$SHARES_CONF"
-  # Ask once about the projects found on this server; later ones are offered in Telegram.
-  local found=() p kind
-  mapfile -t found < <(detect_projects | while read -r p; do shares_list | grep -q " $p\$" || echo "$p"; done)
-  [[ ${#found[@]} -gt 0 ]] || return 0
-  printf '\n\033[1m4. Proyek di server ini\033[0m\n' >/dev/tty
-  for p in "${found[@]}"; do
-    kind=""; [[ -f "$p/artisan" ]] && kind="Laravel"; [[ -z "$kind" && -f "$p/package.json" ]] && kind="Node"
-    db_info "$p" 2>/dev/null && [[ -f "$p/.env" ]] && kind+="${kind:+, }${DB_CONNECTION}"
-    printf '  %s%s\n' "$p" "${kind:+  ($kind)}" >/dev/tty
-  done
-  printf '  Akses penuh = agen bisa mengubah file, .env, dan database. Pengaman: snapshot file tiap\n  5 menit dan backup database tiap jam. Bisa dibuka/ditutup kapan saja dari Telegram.\n' >/dev/tty
-  if [[ "$(ask "  Beri agen akses penuh ke proyek di atas? (y/n)" y)" =~ ^[YyJj] ]]; then
-    for p in "${found[@]}"; do echo "rw $p" >> "$SHARES_CONF"; done
-  else
-    printf '  Baik. Buka nanti dari Telegram: /daftar_akses\n' >/dev/tty
-    DECLINED_PROJECTS="${found[*]}"
+  # Every detected project is shared automatically (no question); opt out with .otb-ignore
+  # in the folder or "otb unshare <path>". OTB_AUTO_SHARE=0 turns this off.
+  [[ "${OTB_AUTO_SHARE:-1}" == 0 ]] && return 0
+  projects_autoshare
+  if [[ -n "$AUTOSHARED" && $INTERACTIVE -eq 1 ]]; then
+    printf '\n\033[1mProyek yang bisa dikerjakan agen\033[0m (akses penuh; pengaman: snapshot 5 menit + backup DB per jam)\n' >/dev/tty
+    while read -r p; do [[ -n "$p" ]] && printf '  %s\n' "$p" >/dev/tty; done <<<"$AUTOSHARED"
+    printf '  Kecualikan folder: buat file .otb-ignore di dalamnya, atau: otb unshare <path>\n' >/dev/tty
   fi
+  return 0
 }
 
 # Applies shares.conf: ACLs, systemd drop-ins, bot browse roots, git safe.directory.

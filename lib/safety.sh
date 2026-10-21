@@ -12,7 +12,7 @@ BACKUP_ROOT=/var/backups/otb
 SNAP_EXCLUDES=(vendor node_modules storage/logs storage/framework bootstrap/cache .phpunit.cache)
 
 safety_load() {
-  SNAPSHOT_KEEP_DAYS=7 BACKUP_KEEP_HOURS=48 BACKUP_KEEP_DAYS=14
+  SNAPSHOT_KEEP_DAYS=7 BACKUP_KEEP_HOURS=48 BACKUP_KEEP_DAYS=14 BACKUP_MAX_MB=2048
   if [[ -f "$SAFETY_CONF" ]]; then
     # shellcheck disable=SC1090
     . "$SAFETY_CONF"
@@ -202,9 +202,37 @@ ensure_db_tools() {
   esac
 }
 
+db_size_mb() { # db_size_mb <share>  -> database size in MB ("" if unknown); needs db_info first
+  local tmpcnf
+  case "$DB_CONNECTION" in
+    mysql|mariadb)
+      [[ "$DB_DATABASE" =~ ^[A-Za-z0-9_-]+$ ]] || return 0
+      tmpcnf="$(mktemp)"; chmod 0600 "$tmpcnf"
+      printf '[client]\nuser=%s\npassword=%s\nhost=%s\nport=%s\n' "$DB_USERNAME" "$DB_PASSWORD" "${DB_HOST:-127.0.0.1}" "${DB_PORT:-3306}" > "$tmpcnf"
+      mysql --defaults-extra-file="$tmpcnf" -N -B -e \
+        "SELECT COALESCE(ROUND(SUM(data_length + index_length) / 1048576), 0) FROM information_schema.tables WHERE table_schema = '$DB_DATABASE'" 2>/dev/null || true
+      rm -f "$tmpcnf" ;;
+    pgsql)
+      PGPASSWORD="$DB_PASSWORD" psql -tA -h "${DB_HOST:-127.0.0.1}" -p "${DB_PORT:-5432}" -U "$DB_USERNAME" -d "$DB_DATABASE" \
+        -c "SELECT pg_database_size(current_database()) / 1048576" 2>/dev/null || true ;;
+    sqlite)
+      [[ -f "$DB_DATABASE" ]] && echo $(( $(stat -c %s "$DB_DATABASE") / 1048576 )) ;;
+  esac
+  return 0
+}
+
 backup_one() { # backup_one <share>  -> prints the backup file path
-  local p="$1" dir out tmpcnf rc=0
+  local p="$1" dir out tmpcnf rc=0 size
   db_info "$p" || { warn "Tidak ada $p/.env; backup database dilewati."; return 0; }
+  # Very large databases are not dumped automatically (disk); OTB_BACKUP_FORCE=1 overrides.
+  if [[ "${OTB_BACKUP_FORCE:-0}" != 1 && "${BACKUP_MAX_MB:-0}" -gt 0 ]]; then
+    ensure_db_tools "$DB_CONNECTION" >/dev/null 2>&1 || true
+    size="$(db_size_mb "$p" | tr -dc '0-9')"
+    if [[ -n "$size" ]] && (( size > BACKUP_MAX_MB )); then
+      warn "Database $p ${size} MB > batas ${BACKUP_MAX_MB} MB; backup otomatis dilewati (paksa: otb backup $(basename "$p"))."
+      return 2
+    fi
+  fi
   dir="$BACKUP_ROOT/$(share_slug "$p")"
   install -d -m 0700 -o root -g root "$BACKUP_ROOT" "$dir"
   out="$dir/$(date +%Y%m%d-%H%M%S)"
@@ -260,7 +288,7 @@ backup_restore() { # backup_restore <share> <file>   (caller confirms; a fresh b
   [[ "$f" == /* ]] || f="$BACKUP_ROOT/$(share_slug "$p")/$f"
   [[ -f "$f" ]] || die "File backup tidak ditemukan: $f"
   db_info "$p" || die "Tidak ada $p/.env."
-  pre="$(backup_one "$p")" || die "Backup sebelum restore gagal; restore dibatalkan."
+  pre="$(OTB_BACKUP_FORCE=1 backup_one "$p")" || die "Backup sebelum restore gagal; restore dibatalkan."
   case "$DB_CONNECTION" in
     mysql|mariadb)
       tmpcnf="$(mktemp)"; chmod 0600 "$tmpcnf"
@@ -293,6 +321,8 @@ SNAPSHOT_KEEP_DAYS=7      # file snapshots (every 5 minutes) are kept this many 
 BACKUP_KEEP_HOURS=48      # every hourly database backup from the last N hours is kept
 BACKUP_KEEP_DAYS=14       # after that, one backup per day for this many days
 EOF
+  grep -q '^BACKUP_MAX_MB=' "$SAFETY_CONF" \
+    || echo 'BACKUP_MAX_MB=2048        # larger databases are not backed up automatically (0 = no limit)' >> "$SAFETY_CONF"
   chmod 0644 "$SAFETY_CONF"
   cat > /etc/systemd/system/otb-snapshot.service <<'EOF'
 [Unit]

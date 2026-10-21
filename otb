@@ -8,6 +8,7 @@ WORKSPACE=/srv/workspace
 
 die()  { printf '\033[1;31m[otb] GAGAL:\033[0m %s\n' "$*" >&2; exit 1; }
 log()  { printf '\033[1;34m[otb]\033[0m %s\n' "$*" >&2; }
+warn() { printf '\033[1;33m[otb] PERINGATAN:\033[0m %s\n' "$*" >&2; }
 
 [[ -f "$INSTALL_CONF" ]] || die "otb belum terpasang (tidak ada $INSTALL_CONF). Jalankan install.sh dulu."
 MODE="$(sed -n 's/^MODE=//p' "$INSTALL_CONF")"
@@ -36,10 +37,10 @@ Pemakaian: otb <perintah>
   verify               jalankan uji keamanan
   clone <url> [nama]   clone repo ke $WORKSPACE sebagai user agen
   attach               buka TUI OpenCode yang terhubung ke agen (sesi yang sama dengan Telegram)
-  policy [nama]        lihat/ganti persetujuan perintah: otomatis | seimbang | ketat | custom
+  policy [nama]        lihat/ganti persetujuan perintah: penuh | otomatis | seimbang | ketat | custom
   github-key [test|off] beri agen akses git push ke GitHub (setiap push tetap ditanya)
   (tanpa argumen)      ringkasan status dan perintah penting
-  detect               cari proyek di server (Telegram: /akses_<proyek>)
+  detect               cari proyek baru sekarang dan buka untuk agen (otomatis tiap jam)
   shares               daftar folder di luar workspace yang boleh diakses agen
   share <path> [--write]  izinkan agen membaca (atau --write: menulis, termasuk .env & database)
   unshare <path>       cabut akses agen ke folder itu
@@ -182,6 +183,7 @@ EOF
   fi
   cat "$src" > "$managed"          # same inode: Docker mode bind-mounts this file
   conf_set "$conf" POLICY "$name"
+  conf_set "$conf" POLICY_AUTO 0     # chosen by hand: the installer no longer adjusts it
   if [[ "$MODE" == "systemd" ]]; then systemctl restart otb-agent.service otb-bot.service
   else "${COMPOSE[@]}" restart agent bot >/dev/null; fi
   wait_agent
@@ -339,6 +341,7 @@ EOF
   fi
   { shares_list | grep -v " $real\$" || true; echo "$mode $real"; } > "$SHARES_CONF.tmp"
   chmod 0644 "$SHARES_CONF.tmp"; mv "$SHARES_CONF.tmp" "$SHARES_CONF"
+  project_mark "$real" shared
   reapply || die "Gagal menerapkan konfigurasi."
   log "Agen sekarang bisa $([[ $mode == rw ]] && echo "membaca & menulis" || echo "membaca") $real. Buka di Telegram: /open"
 }
@@ -350,7 +353,9 @@ cmd_unshare() {
   shares_list | grep -q " $real\$" || die "$real tidak ada di daftar (lihat: otb shares)."
   { shares_list | grep -v " $real\$" || true; } > "$SHARES_CONF.tmp"
   chmod 0644 "$SHARES_CONF.tmp"; mv "$SHARES_CONF.tmp" "$SHARES_CONF"
+  project_mark "$real" closed     # not shared again automatically
   reapply || die "Gagal menerapkan konfigurasi."
+  log "Akses agen ke $real ditutup dan tidak akan dibuka otomatis lagi (buka lagi: otb share $real --write)."
 }
 
 # ---------------------------------------------------------------- safety nets
@@ -407,7 +412,14 @@ cmd_backup() {
   local target="" quiet=0 a
   for a in "$@"; do case "$a" in --quiet|-q) quiet=1 ;; *) target="$a" ;; esac; done
   safety_load
-  _bk() { local f; if f="$(backup_one "$1")"; then backup_prune "$1"; [[ $quiet -eq 1 || -z "$f" ]] || log "Backup database $1: $f"; else return 1; fi; }
+  # A folder named by hand is always backed up, even above BACKUP_MAX_MB.
+  [[ -n "$target" && "$target" != --all ]] && export OTB_BACKUP_FORCE=1
+  _bk() { local f rc=0; f="$(backup_one "$1")" || rc=$?
+    case $rc in
+      0) backup_prune "$1"; [[ $quiet -eq 1 || -z "$f" ]] || log "Backup database $1: $f" ;;
+      2) ;;            # too large for automatic backups (already warned)
+      *) return 1 ;;
+    esac; }
   for_targets _bk "$target"
 }
 
@@ -441,59 +453,51 @@ tg_send() { # tg_send <text>  -> message to the allowed user (token read from bo
     | curl -sS --max-time 15 --config - --data-urlencode "chat_id=$uid" --data-urlencode "text=$1" >/dev/null 2>&1 || true
 }
 
-# Run by otb-requests.service (root) when the bot drops request files. Only slugs from
-# projects.conf are accepted; request files are read as data, never executed.
-cmd_handle_requests() {
-  local f line act slug path name changed=0 msgs=() done_msgs=()
-  shopt -s nullglob
-  for f in "$REQUESTS"/*.req; do
-    if [[ -L "$f" || ! -f "$f" ]]; then rm -f "$f"; continue; fi
-    line="$(head -c 64 "$f" | head -n1)"; rm -f "$f"
-    [[ "$line" =~ ^(akses|tutup)\ ([a-z0-9_]{1,26})$ ]] || continue
-    act="${BASH_REMATCH[1]}"; slug="${BASH_REMATCH[2]}"
-    path="$(project_path "$slug")"; name="$(basename "${path:-$slug}")"
-    if [[ -z "$path" || ! -d "$path" ]]; then msgs+=("❌ Proyek '$slug' tidak dikenal. Lihat /daftar_akses"); continue; fi
-    if [[ "$act" == akses ]]; then
-      if shares_list | grep -qx "rw $path"; then msgs+=("ℹ️ $name sudah terbuka untuk agen."); continue; fi
-      if ! (share_validate "$path") >/dev/null 2>&1; then msgs+=("❌ $name tidak boleh dibagikan."); continue; fi
-      { shares_list | grep -v " $path\$" || true; echo "rw $path"; } > "$SHARES_CONF.tmp"
-      project_set_state "$slug" shared
-      done_msgs+=("✅ Agen sekarang punya akses penuh ke $name ($path). Snapshot tiap 5 menit & backup database tiap jam aktif. Pilih proyeknya: /open")
-    else
-      if ! shares_list | grep -q " $path\$"; then msgs+=("ℹ️ $name memang belum terbuka."); continue; fi
-      { shares_list | grep -v " $path\$" || true; } > "$SHARES_CONF.tmp"
-      project_set_state "$slug" closed
-      done_msgs+=("🔒 Akses agen ke $name ditutup. Snapshot & backup lama tetap tersimpan.")
-    fi
-    chmod 0644 "$SHARES_CONF.tmp"; mv "$SHARES_CONF.tmp" "$SHARES_CONF"; changed=1
-  done
-  if [[ $changed -eq 1 ]]; then
-    if reapply; then msgs+=("${done_msgs[@]}")
-    else msgs+=("❌ Gagal menerapkan perubahan akses. Cek di server: otb verify"); fi
-  fi
-  local m; for m in "${msgs[@]}"; do tg_send "$m"; done
+agent_busy() { # is the agent working on a task right now? (systemd mode)
+  # Session status is per project directory, so ask for every directory a task can run in.
+  local pw d dirs
+  pw="$(sed -n 's/^OPENCODE_SERVER_PASSWORD=//p' /etc/otb/agent.env)"
+  _api() { local u="$1"; shift; printf 'user = "opencode:%s"\n' "$pw" | curl -sf -m 5 --config - "$@" "http://127.0.0.1:4096$u" 2>/dev/null; }
+  dirs="$( { echo "$WORKSPACE"; find "$WORKSPACE" -mindepth 1 -maxdepth 1 -type d 2>/dev/null; shares_list | awk '{ print $2 }'
+    _api /project | grep -o '"worktree":"[^"]*"' | cut -d'"' -f4; } | sort -u)"
+  while read -r d; do
+    [[ -n "$d" && "$d" != / ]] || continue
+    _api /session/status -G --data-urlencode "directory=$d" | grep -q '"busy"' && return 0
+  done <<<"$dirs"
+  return 1
 }
 
+# Share newly detected projects (run hourly by otb-detect.timer, or by hand).
 cmd_detect() {
-  local notify=0 slug state path
+  local notify=0 p names="" slug state path
   [[ "${1:-}" == --notify ]] && notify=1
   [[ "$MODE" == systemd ]] || die "Hanya untuk mode systemd."
-  projects_sync
-  write_project_commands
-  if [[ "$CMDS_CHANGED" == 1 ]] && systemctl is-active --quiet otb-bot.service; then
-    systemctl restart otb-bot.service; sleep 8   # new /akses_ commands are loaded at bot start
-  fi
-  if [[ $notify -eq 1 ]]; then
-    while read -r slug state path; do
-      [[ "$state" == new ]] || continue
-      tg_send "📁 Proyek baru terdeteksi: $(basename "$path") ($path). Beri agen akses penuh: /akses_$slug  (tawaran ini hanya dikirim sekali; semua proyek: /daftar_akses)"
-      project_set_state "$slug" offered
-    done < <(projects_list)
+  # Sharing restarts the agent; never interrupt a running task: try again next hour.
+  if [[ $notify -eq 1 ]] && agent_busy; then log "Agen sedang bekerja; deteksi ditunda."; return 0; fi
+  projects_autoshare
+  if [[ -n "$AUTOSHARED" ]]; then
+    reapply || { tg_send "❌ Proyek baru terdeteksi tapi gagal dibuka untuk agen. Cek di server: otb verify"; return 1; }
+    safety_load
+    local big="" size
+    while read -r p; do
+      [[ -n "$p" ]] || continue
+      names+="${names:+, }$(basename "$p")"
+      if db_info "$p" 2>/dev/null; then
+        size="$(db_size_mb "$p" | tr -dc '0-9')"
+        [[ -n "$size" ]] && (( BACKUP_MAX_MB > 0 && size > BACKUP_MAX_MB )) && big+=" ⚠️ Database $(basename "$p") ${size} MB terlalu besar untuk backup otomatis; backup manual: otb backup $(basename "$p")."
+      fi
+    done <<<"$AUTOSHARED"
+    [[ $notify -eq 1 ]] && tg_send "📁 Proyek baru bisa dikerjakan agen: $names. Pilih dengan /open. (Snapshot tiap 5 menit & backup database tiap jam aktif. Tidak mau dibuka? Di server: otb unshare <path>)$big"
+    log "Dibuka untuk agen: $names"
   else
-    echo "Proyek di server ini (✅ terbuka untuk agen):"
+    [[ $notify -eq 1 ]] || log "Tidak ada proyek baru."
+  fi
+  if [[ $notify -eq 0 ]]; then
+    echo "Proyek di server ini:"
     while read -r slug state path; do
-      printf '  %s %-28s %s\n' "$([[ $state == shared ]] && echo ✅ || echo ⬜)" "$(basename "$path")" "Telegram: /$([[ $state == shared ]] && echo tutup || echo akses)_$slug"
+      printf '  %s %s\n' "$([[ $state == shared ]] && echo "✅" || echo "⛔")" "$path"
     done < <(projects_list)
+    echo "  (✅ bisa dikerjakan agen, ⛔ dikecualikan; buka lagi: otb share <path> --write)"
   fi
 }
 
@@ -509,11 +513,11 @@ cmd_summary() {
   echo "otb — agen OpenCode via Telegram (mode $MODE)"
   echo "  Bot: ${bot:-?}   Agen: ${agent:-?}   Model: $model   Persetujuan: ${policy:-?}"
   if [[ -s "$PROJECTS_CONF" ]]; then
-    printf '  Proyek:'; awk '{ n=$3; sub(/.*\//, "", n); printf "  %s %s", ($2 == "shared" ? "✅" : "⬜"), n }' "$PROJECTS_CONF"; echo
+    printf '  Proyek:'; awk '{ n=$3; sub(/.*\//, "", n); printf "  %s %s", ($2 == "shared" ? "✅" : "⛔"), n }' "$PROJECTS_CONF"; echo
   fi
   cat <<'EOF'
 
-Dari Telegram:  /open  /daftar_akses  /akses_<proyek>  /tutup_<proyek>  /model
+Dari Telegram:  /open (pilih proyek)   repo baru: /open workspace → "clone <url-git>"   /model
 Di server:      otb logs        otb restart     otb verify
                 otb snapshots <proyek>   otb restore <proyek> <id>   otb restore-db <proyek> <file>
                 otb help        (semua perintah)
@@ -532,7 +536,7 @@ cmd_clone() {
   else
     docker exec otb-agent git clone -- "$url" "$WORKSPACE/$name"
   fi
-  log "Siap: $WORKSPACE/$name. Pilih proyek ini di Telegram dengan /projects."
+  log "Siap: $WORKSPACE/$name. Pilih proyek ini di Telegram dengan /open."
 }
 
 cmd_update() {
@@ -609,7 +613,6 @@ case "$cmd" in
   attach) need_root attach; cmd_attach ;;
   summary) need_root summary; cmd_summary ;;
   detect) need_root detect "$@"; cmd_detect "$@" ;;
-  handle-requests) need_root handle-requests; cmd_handle_requests ;;
   shares) cmd_shares ;;
   snapshot) need_root snapshot "$@"; cmd_snapshot "$@" ;;
   snapshots) need_root snapshots "$@"; cmd_snapshots "$@" ;;

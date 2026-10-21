@@ -71,8 +71,8 @@ if [[ $mode_a -eq 1 || $mode_b -eq 1 ]]; then
     'h=/var/lib/otb-agent; [ -d /home/agent ] && h=/home/agent; mkdir -p "$h/.opencode/plugins" && touch "$h/.opencode/plugins/x.ts"'
   expect_denied as_agent "Agent cannot read the Telegram bot token" \
     'cat /etc/otb/bot.env || cat /data/.env || ls /var/lib/otb-bot'
-  expect_denied as_agent "Agent cannot drop Telegram access requests (/akses_...)" \
-    'touch /var/lib/otb-bot/requests/x.req'
+  expect_denied as_agent "Agent cannot change which projects are shared" \
+    'echo "rw /etc" >> /etc/otb/shares.conf || echo "x shared /etc" >> /etc/otb/projects.conf'
   expect_denied as_agent "Agent cannot see anything in /root" 'ls -A /root 2>/dev/null | grep -q .'
   shares="$(awk '$1 ~ /^(ro|rw)$/ && $2 ~ /^\// {print $1, $2}' /etc/otb/shares.conf 2>/dev/null)"
   if [[ $mode_b -eq 1 ]]; then

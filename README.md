@@ -27,13 +27,12 @@ Siapkan dulu:
 - **Token bot** dari [@BotFather](https://t.me/BotFather) (`/newbot`).
 - **API key OpenCode Zen** dari https://opencode.ai/auth (satu key untuk banyak model). Buat key khusus untuk VPS ini dan pasang batas pemakaian di dashboard.
 
-Wizard hanya menanyakan **4 hal**:
+Wizard hanya menanyakan **3 hal** (saat update/instal ulang: tidak ada pertanyaan sama sekali):
 
 ```
 Token bot                     input disembunyikan, langsung dicek ke Telegram
 Kirim pesan ke bot            user ID Anda terdeteksi otomatis, cukup konfirmasi namanya (y)
 API key OpenCode Zen          input disembunyikan; ketik "lain" untuk provider lain (Gemini, DeepSeek, ...)
-Akses ke proyek? (y/n)        proyek di server ditampilkan (mis. /home/ubuntu/web-sekolah); y = akses penuh
 ```
 
 Sisanya dipilih otomatis:
@@ -42,28 +41,30 @@ Sisanya dipilih otomatis:
 |---|---|---|
 | Mode | systemd | `--mode docker` |
 | Model | `opencode/space-bunny-free` (gratis). Rekomendasi: `deepseek-v4.1-flash-free` | `otb reconfigure` |
-| Persetujuan | **penuh** jika ada proyek yang dibuka (pengamannya snapshot + backup), selain itu **otomatis** | `otb policy` |
+| Proyek | **semua proyek yang terdeteksi** dibuka untuk agen (baca-tulis) | `.otb-ignore` / `otb unshare` |
+| Persetujuan | **penuh** jika ada proyek (pengamannya snapshot + backup), selain itu **otomatis** | `otb policy` |
 | Firewall (ufw + SSH key-only) | tidak dipasang | `--harden-host` |
 
 Installer lalu memasang dependensi, menjalankan layanan, menjalankan uji keamanan (`verify.sh`), dan mengirim pesan **"✅ Bot OpenCode aktif"** ke Telegram.
 
-### Kelola akses proyek dari Telegram
+### Memilih proyek dari Telegram
 
-Setiap proyek yang terdeteksi (folder berisi `.git`, `artisan`, `composer.json`, atau `package.json` di `/home/<user>/…` dan `/var/www/…`) mendapat perintah Telegram sendiri:
+Semua proyek di server dibuka untuk agen secara otomatis: folder berisi `.git`, `artisan`, `composer.json`, atau `package.json` di `/home/<user>/…` dan `/var/www/…`. Di Telegram cukup:
 
 | Perintah | Fungsi |
 |---|---|
-| `/daftar_akses` | Daftar proyek beserta status akses agen |
-| `/akses_<proyek>` | Beri agen akses penuh (baca-tulis) ke proyek itu; snapshot + backup DB langsung aktif |
-| `/tutup_<proyek>` | Cabut akses agen |
+| `/open` | Pilih proyek (tombol), lalu kirim tugas |
+| `/open` → `workspace` → "clone https://github.com/…" | Repo baru: agen meng-clone ke `/srv/workspace`, lalu pilih dengan `/open` |
+| `/model` | Ganti model AI |
 
-Nama perintah diambil dari nama folder, mis. `web-sekolah` → `/akses_web_sekolah`. Perubahan berlaku dalam ±1 menit dan dikonfirmasi lewat pesan.
+- Setiap jam server mencari proyek baru. Proyek baru langsung dibuka, dan Anda mendapat **satu pesan** di Telegram. Jika agen sedang mengerjakan tugas, pemeriksaan ditunda ke jam berikutnya, karena membuka proyek me-restart agen.
+- **Mengecualikan folder:** buat file `.otb-ignore` di dalamnya (sebelum terdeteksi), atau `otb unshare <path>`. Folder yang di-unshare tidak akan dibuka otomatis lagi; buka lagi dengan `otb share <path> --write`.
+- Setiap proyek otomatis mendapat snapshot file (tiap 5 menit) dan backup database (tiap jam). Database di atas 2 GB tidak di-backup otomatis (Anda diberi tahu di Telegram); backup manual: `otb backup <proyek>`. Batasnya diatur di `/etc/otb/safety.conf` (`BACKUP_MAX_MB`).
+- Repo privat untuk clone: jalankan dulu `otb github-key` di server.
 
-- **Akses tetap, jarang bertanya.** Akses yang sudah dibuka tidak ditanyakan lagi. Setiap jam server memeriksa proyek baru; proyek baru **ditawarkan sekali** di Telegram, lalu tidak ditanya lagi (tetap bisa dibuka kapan saja dengan `/akses_…`).
-- Bot hanya bisa membuka proyek yang **terdeteksi** dan tercatat di `/etc/otb/projects.conf`, bukan path sembarang, jadi bot yang dibajak pun tidak bisa membuka `/etc` atau `.ssh`. Agen sendiri tidak bisa mengirim permintaan akses (diuji `verify.sh`).
-- Hanya akun Telegram pemilik yang dilayani; pesan dari akun lain diabaikan.
+> ⚠️ Karena semua proyek terbuka, agen yang terkena prompt injection dari satu proyek bisa mengubah proyek lain. Pengamannya adalah snapshot dan backup (lihat [Pengaman otomatis](#pengaman-otomatis-untuk-folder---write)), bukan pembatasan akses. Kecualikan proyek yang tidak perlu disentuh agen.
 
-Untuk memakai Docker: `curl ... | bash -s -- --mode docker` (fitur akses proyek hanya di mode systemd).
+Untuk memakai Docker: `curl ... | bash -s -- --mode docker` (akses otomatis ke proyek di luar workspace hanya di mode systemd).
 
 ### Cara yang lebih hati-hati
 
@@ -81,10 +82,10 @@ sudo ./install.sh
 
 ### Setelah instalasi: mulai dari Telegram
 
-1. Buka akses ke proyek: `/akses_<proyek>` (lihat daftarnya dengan `/daftar_akses`), atau clone repo baru ke workspace: `otb clone https://github.com/<anda>/<repo>.git`.
-2. Pilih proyeknya dengan `/projects` (atau `/open` untuk folder proyek), lalu kirim tugas.
+1. `/open`, pilih proyek, lalu kirim tugas.
+2. Repo baru: `/open` → `workspace`, lalu kirim "clone https://github.com/<anda>/<repo>.git". Setelah selesai, pilih repo itu dengan `/open`. (Dari terminal juga bisa: `otb clone <url>`.)
 
-Agen hanya bisa bekerja di `/srv/workspace` dan proyek yang dibuka aksesnya; bagian lain dari VPS sengaja tidak bisa ia lihat.
+Agen hanya bisa bekerja di `/srv/workspace` dan proyek yang terdeteksi; bagian lain dari VPS (konfigurasi sistem, `.ssh`, folder home lain) sengaja tidak bisa ia lihat.
 
 ### Melihat agen dari terminal (seperti OpenCode biasa)
 
@@ -105,7 +106,7 @@ otb attach
 | `otb attach` | Buka TUI OpenCode yang terhubung ke agen (sesi yang sama dengan di Telegram) |
 | `otb policy [nama]` | Lihat atau ganti preset persetujuan: `penuh`, `otomatis`, `seimbang`, `ketat`, `custom` |
 | `otb shares` / `otb share <path> [--write]` / `otb unshare <path>` | Folder di luar workspace yang boleh diakses agen |
-| `otb detect [--notify]` | Cari proyek baru sekarang (otomatis tiap jam); `--notify` menawarkannya di Telegram |
+| `otb detect` | Cari proyek baru sekarang dan buka untuk agen (otomatis tiap jam) |
 | `otb snapshots` / `otb restore` / `otb restore-git` | Snapshot file dan riwayat git folder `--write` |
 | `otb backups` / `otb backup` / `otb restore-db` | Backup database folder `--write` |
 | `otb github-key [test\|off]` | Beri agen akses `git push` ke GitHub (setiap push tetap ditanya; force push diblokir) |
@@ -189,11 +190,11 @@ Installer mengunduh tarball resmi dari nodejs.org dan mencocokkannya dengan `SHA
 otb clone https://github.com/<anda>/<repo>.git
 ```
 
-Lalu pilih proyeknya di Telegram dengan `/projects`. Untuk repo privat, gunakan **deploy key read-only** (bukan SSH key akun GitHub Anda). Pada mode systemd, taruh di `/var/lib/otb-agent/.ssh/`.
+Lalu pilih proyeknya di Telegram dengan `/open`. Bisa juga dari Telegram: `/open` → `workspace`, lalu minta agen "clone <url>". Untuk repo privat, gunakan **deploy key read-only** (bukan SSH key akun GitHub Anda). Pada mode systemd, taruh di `/var/lib/otb-agent/.ssh/`.
 
 ### Folder di luar workspace (mis. website produksi)
 
-Secara default agen hanya bisa bekerja di `/srv/workspace`. Proyek yang terdeteksi paling mudah dibuka lewat Telegram (`/akses_<proyek>`, lihat [Kelola akses proyek dari Telegram](#kelola-akses-proyek-dari-telegram)). Folder lain, atau akses baca saja, diatur dari terminal:
+Secara default agen hanya bisa bekerja di `/srv/workspace`. Proyek yang terdeteksi sudah dibuka otomatis (lihat [Memilih proyek dari Telegram](#memilih-proyek-dari-telegram)). Folder lain, akses baca saja, atau mengecualikan proyek diatur dari terminal:
 
 ```bash
 otb share /home/ubuntu/web-sekolah            # baca saja
@@ -331,13 +332,14 @@ curl -fsSL https://raw.githubusercontent.com/mikhsanw/agent-ai-opencode/main/boo
 | `OTB_API_KEY` | Wajib |
 | `OTB_API_KEY_ENV` | Opsional; nama env API key (otomatis dari katalog OpenCode) |
 | `OTB_POLICY` | Opsional; `otomatis` (default), `seimbang`, `ketat`, `penuh` (default jika ada share rw), `custom` |
-| `OTB_SHARES` | Opsional; mis. `rw:/home/ubuntu/web-sekolah ro:/var/www/lain` |
+| `OTB_SHARES` | Opsional; folder tambahan, mis. `rw:/srv/lain ro:/var/www/lain` |
+| `OTB_AUTO_SHARE` | Opsional; `0` = jangan buka proyek terdeteksi secara otomatis |
 | `OTB_CLONE` | Opsional; URL repo dipisah spasi, langsung di-clone ke workspace |
 | `OTB_NODE_MIRROR` | Opsional; mirror Node.js |
 | `OTB_TELEGRAM_API_ROOT` | Opsional; URL Bot API Telegram lain (mis. server Bot API sendiri atau proxy) |
 | `OTB_REF`, `OTB_REPO_URL` | Opsional; tag atau repo lain (misalnya fork Anda) |
 
-Tanpa `OTB_SHARES`, mode non-interaktif tidak membuka proyek apa pun; proyek yang terdeteksi ditawarkan di Telegram. Opsi lain untuk `install.sh`: `--mode docker`, `--harden-host` (ufw + SSH key-only; tidak dipasang tanpa opsi ini), `--no-harden-host`, `--skip-telegram-check` (jika Telegram hanya bisa diakses lewat proxy), `--no-deps`, `--reconfigure`, `--yes`.
+Proyek yang terdeteksi dibuka otomatis juga di mode non-interaktif; `OTB_SHARES` menambah folder lain, dan `OTB_AUTO_SHARE=0` mematikan pembukaan otomatis. Opsi lain untuk `install.sh`: `--mode docker`, `--harden-host` (ufw + SSH key-only; tidak dipasang tanpa opsi ini), `--no-harden-host`, `--skip-telegram-check` (jika Telegram hanya bisa diakses lewat proxy), `--no-deps`, `--reconfigure`, `--yes`.
 
 ---
 
@@ -350,7 +352,7 @@ install.sh                     wizard + instalasi (idempoten, aman dijalankan ul
 lib/catalog.mjs                membaca katalog provider/model dari OpenCode untuk wizard
 lib/shares.sh                  berbagi folder di luar workspace (ACL + drop-in systemd)
 lib/safety.sh                  snapshot file, salinan .git, dan backup database untuk folder --write
-lib/projects.sh                deteksi proyek + perintah Telegram /akses_* /tutup_* /daftar_akses
+lib/projects.sh                deteksi proyek, dibuka otomatis untuk agen (+ timer tiap jam)
 otb                            perintah pengelolaan (terpasang di /usr/local/bin/otb)
 verify.sh                      uji keamanan untuk kedua mode
 config/policies/*.json         preset persetujuan (penuh, otomatis, seimbang, ketat, dan varian -push); dipasang sebagai managed config OpenCode
