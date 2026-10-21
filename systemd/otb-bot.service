@@ -30,7 +30,7 @@ ReadOnlyPaths=/srv/workspace
 PrivateTmp=yes
 # The bot cannot start its own OpenCode (which would run outside the agent sandbox
 # and next to the Telegram token), and cannot see the agent's secrets.
-InaccessiblePaths=-/opt/otb/agent -/etc/otb/agent.env -/var/lib/otb-agent
+InaccessiblePaths=-/opt/otb/agent -/etc/otb/agent.env -/var/lib/otb-agent -/var/lib/otb -/var/backups/otb
 
 # --- Privileges.
 NoNewPrivileges=yes

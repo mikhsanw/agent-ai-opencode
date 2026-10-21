@@ -42,7 +42,7 @@ Provider                      daftar dari katalog OpenCode; default OpenCode Zen
 API key                       nama env variable terisi otomatis; input disembunyikan
 Model                         daftar bernomor dari katalog, model gratis diberi tanda [gratis]
 Folder di luar workspace      opsional, mis. /home/ubuntu/web-sekolah (baca saja / baca-tulis)
-Persetujuan                   otomatis (default) / seimbang / ketat
+Persetujuan                   otomatis (default) / seimbang / ketat / penuh
 Repo untuk workspace          opsional, langsung di-clone ke /srv/workspace
 Pasang firewall? (y/n)        ufw + SSH key-only, rencananya ditampilkan dulu
 ```
@@ -92,6 +92,8 @@ otb attach
 | `otb attach` | Buka TUI OpenCode yang terhubung ke agen (sesi yang sama dengan di Telegram) |
 | `otb policy [nama]` | Lihat atau ganti preset persetujuan: `otomatis`, `seimbang`, `ketat`, `custom` |
 | `otb shares` / `otb share <path> [--write]` / `otb unshare <path>` | Folder di luar workspace yang boleh diakses agen |
+| `otb snapshots` / `otb restore` / `otb restore-git` | Snapshot file dan riwayat git folder `--write` |
+| `otb backups` / `otb backup` / `otb restore-db` | Backup database folder `--write` |
 | `otb github-key [test\|off]` | Beri agen akses `git push` ke GitHub (setiap push tetap ditanya; force push diblokir) |
 | `otb verify` | Jalankan uji keamanan |
 | `otb restart` | Restart bot dan agen |
@@ -202,7 +204,32 @@ Cara kerjanya:
 - `otb unshare` dan `otb uninstall` mencabut ACL dan mengembalikan kepemilikan file buatan agen ke pemilik folder.
 - Folder sistem, seluruh home (`/home/ubuntu`), dan folder yang berisi `.ssh` tidak bisa dibagikan.
 
-> ⚠️ **Dengan `--write`, agen bekerja langsung di website yang sedang berjalan.** Isi `.env` dan data database (mis. data siswa) bisa terkirim ke penyedia model AI dan tampil di Telegram; gunakan model yang tidak memakai data untuk training. Di preset otomatis, edit file dan `php artisan migrate` berjalan tanpa ditanya (yang ditanya: `rm`, `migrate:fresh/rollback/db:wipe/db:seed`, `mysql`, dll.). Pastikan folder itu repo git (agar perubahan bisa dilihat dan dibatalkan) dan database punya backup rutin. Cara yang lebih aman: kerjakan perubahan di salinan (`otb clone`) lalu deploy sendiri.
+#### Pengaman otomatis untuk folder `--write`
+
+Untuk folder baca-tulis, pengamannya adalah **snapshot dan backup otomatis**, bukan tombol persetujuan. Wizard menawarkan preset **penuh**: agen tidak ditanya apa pun kecuali `git push`. Yang tetap diblokir: `sudo`, `docker`, `systemctl`, `ssh`, force push.
+
+| Pengaman | Jadwal | Disimpan | Isi |
+|---|---|---|---|
+| Snapshot file | tiap 5 menit (hanya jika ada perubahan) | 7 hari | semua file, termasuk `.env` dan file yang belum di-commit; kecuali `vendor/`, `node_modules/`, log, cache |
+| Salinan riwayat git (`.git`) | bersama snapshot | sampai `.git` dihapus pemiliknya | commit tidak pernah dibuang, meskipun agen menjalankan `reset --hard`, hapus branch, `gc`, atau `rm -rf .git` |
+| Backup database | tiap jam | semua dari 48 jam terakhir, lalu 1 per hari selama 14 hari | dump dari kredensial di `.env` (MySQL/MariaDB, PostgreSQL, SQLite) |
+
+Semuanya disimpan di `/var/lib/otb` dan `/var/backups/otb`, yang **tidak bisa dilihat atau diubah agen** (diuji `verify.sh`). Git proyek Anda sendiri tidak disentuh. Lama penyimpanan bisa diubah di `/etc/otb/safety.conf`.
+
+```bash
+otb snapshots web-sekolah            # daftar snapshot file
+otb restore web-sekolah <id>         # kembalikan file (dan .git jika terhapus); tampilkan perubahan dulu, minta "yes"
+otb restore-git web-sekolah          # kembalikan commit yang dibuang (reset/hapus branch/gc) dan daftarkan
+otb backups web-sekolah              # daftar backup database
+otb backup web-sekolah               # backup sekarang, mis. sebelum meminta perubahan besar
+otb restore-db web-sekolah <file>    # pulihkan database (menimpa); minta "yes"
+```
+
+Setiap restore lebih dulu menyimpan kondisi saat ini (snapshot atau backup baru), sehingga restore pun bisa dibatalkan.
+
+Diuji dengan skenario terburuk: dari dalam sandbox, agen menghapus `.git` dan folder `app/`, merusak `.env` dan halaman, lalu `DROP TABLE siswa`. Dengan `otb restore` dan `otb restore-db`, semuanya kembali: website, file, `.env`, data siswa, dan riwayat git.
+
+> ⚠️ **Batasannya:** perubahan dalam **5 menit terakhir** (file) dan **1 jam terakhir** (database) bisa hilang; jalankan `otb backup` sebelum pekerjaan berisiko. Snapshot dan backup berada **di VPS yang sama**, jadi kalau VPS-nya rusak keduanya ikut hilang; tetap aktifkan snapshot VPS dari panel provider. Isi `.env` dan data database (mis. data siswa) bisa terkirim ke penyedia model AI dan tampil di Telegram; gunakan model yang tidak memakai data untuk training.
 
 ### Mengizinkan agen `git push` (opsional)
 
@@ -259,6 +286,7 @@ otb policy otomatis   # atau: seimbang, ketat, custom
 | **otomatis** (default) | hampir semua perintah: baca, edit, build, test, `git add/commit/checkout`, `npm`, `composer`, `php artisan migrate`, dll. | yang penting saja: hapus file (`rm`, `find -delete`), `git reset --hard/clean/rebase/restore`, jaringan (`curl`, `wget`, `rsync`), database (`mysql`, `psql`, `artisan migrate:fresh/rollback/db:wipe/db:seed`), `kill`, `chmod`, shell bersarang (`bash -c`), web fetch |
 | **seimbang** | perintah baca dan build/test umum | semua yang lain |
 | **ketat** | `ls`, `pwd`, `git status/diff/log` | semua yang lain |
+| **penuh** (default jika ada folder `--write`) | semua | hanya `git push` (setelah `otb github-key`); pengamannya snapshot dan backup otomatis |
 | **custom** | sesuai `/etc/otb/policy-custom.json` | |
 
 **Diblokir di semua preset:** `git push` (kecuali setelah `otb github-key`: ditanya, force push tetap diblokir), `git config`, `sudo`, `su`, `ssh`, `scp`, `nc`, `docker`, `systemctl`, `crontab`, akses file di luar proyek, serta edit `opencode.json`, `.opencode/`, `.git/`, dan `.env`.
@@ -288,7 +316,7 @@ curl -fsSL https://raw.githubusercontent.com/mikhsanw/agent-ai-opencode/main/boo
 | `OTB_MODEL` | Opsional; default model bawaan provider di katalog OpenCode |
 | `OTB_API_KEY` | Wajib |
 | `OTB_API_KEY_ENV` | Opsional; nama env API key (otomatis dari katalog OpenCode) |
-| `OTB_POLICY` | Opsional; `otomatis` (default), `seimbang`, `ketat`, `custom` |
+| `OTB_POLICY` | Opsional; `otomatis` (default), `seimbang`, `ketat`, `penuh` (default jika ada share rw), `custom` |
 | `OTB_SHARES` | Opsional; mis. `rw:/home/ubuntu/web-sekolah ro:/var/www/lain` |
 | `OTB_CLONE` | Opsional; URL repo dipisah spasi, langsung di-clone ke workspace |
 | `OTB_NODE_MIRROR` | Opsional; mirror Node.js |
@@ -306,9 +334,10 @@ docs/install.sh                salinan bootstrap.sh untuk GitHub Pages (URL pend
 install.sh                     wizard + instalasi (idempoten, aman dijalankan ulang)
 lib/catalog.mjs                membaca katalog provider/model dari OpenCode untuk wizard
 lib/shares.sh                  berbagi folder di luar workspace (ACL + drop-in systemd)
+lib/safety.sh                  snapshot file, salinan .git, dan backup database untuk folder --write
 otb                            perintah pengelolaan (terpasang di /usr/local/bin/otb)
 verify.sh                      uji keamanan untuk kedua mode
-config/policies/*.json         preset persetujuan (otomatis, seimbang, ketat, dan varian -push); dipasang sebagai managed config OpenCode
+config/policies/*.json         preset persetujuan (penuh, otomatis, seimbang, ketat, dan varian -push); dipasang sebagai managed config OpenCode
 tools/gen-push-policies.py     membuat varian -push dari preset dasar
 config/*.env.example           template /etc/otb/*.env
 deploy/{agent,bot}/            package.json + lockfile (versi di-pin)

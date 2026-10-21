@@ -128,6 +128,30 @@ if [[ $mode_a -eq 1 || $mode_b -eq 1 ]]; then
   fi
 fi
 
+# ---------------------------------------------------------------- safety nets (writable shares)
+rw_list="$(awk '$1 == "rw" && $2 ~ /^\// {print $2}' /etc/otb/shares.conf 2>/dev/null)"
+if [[ $mode_a -eq 1 && -n "$rw_list" ]]; then
+  section "Safety nets for writable shared folders"
+  for t in otb-snapshot otb-backup; do
+    systemctl is-active --quiet "$t.timer" && pass "$t.timer is active" || fail "$t.timer is not active"
+  done
+  expect_denied as_agent "Agent cannot see or touch snapshots and database backups" \
+    'ls /var/lib/otb || ls /var/backups/otb || touch /var/lib/otb/x'
+  while IFS= read -r sp; do
+    [[ -z "$sp" ]] && continue
+    slug="$(basename "$sp" | tr -c 'A-Za-z0-9._-' '_')-$(printf '%s' "$sp" | sha256sum | cut -c1-8)"
+    last="$(git --git-dir="/var/lib/otb/snapshots/$slug.git" log --all -1 --format=%ct 2>/dev/null)"
+    if [[ -z "$last" ]]; then fail "No file snapshot yet for $sp"
+    elif (( $(date +%s) - last > 900 )) && [[ -n "$(git -C "$sp" -c safe.directory='*' --git-dir="/var/lib/otb/snapshots/$slug.git" --work-tree="$sp" status --porcelain 2>/dev/null | head -1)" ]]; then
+      warnc "Latest snapshot of $sp is older than 15 minutes while files changed"
+    else pass "File snapshots exist for $sp"; fi
+    newest="$(find "/var/backups/otb/$slug" -maxdepth 1 -type f ! -name '.*' -printf '%T@\n' 2>/dev/null | sort -n | tail -1)"
+    if [[ -z "$newest" ]]; then warnc "No database backup yet for $sp (check: otb backup $sp)"
+    elif (( $(date +%s) - ${newest%.*} > 7200 )); then warnc "Latest database backup of $sp is older than 2 hours"
+    else pass "Recent database backup exists for $sp"; fi
+  done <<<"$rw_list"
+fi
+
 # ---------------------------------------------------------------- OpenCode server
 section "OpenCode server"
 pw="$(env_value "$ETC_DIR/agent.env" OPENCODE_SERVER_PASSWORD)"

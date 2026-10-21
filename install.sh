@@ -69,6 +69,8 @@ fi
 # --------------------------------------------------------------------------- helpers
 # shellcheck source=lib/shares.sh
 source "$REPO_DIR/lib/shares.sh"
+# shellcheck source=lib/safety.sh
+source "$REPO_DIR/lib/safety.sh"
 random_secret() { od -An -tx1 -N24 /dev/urandom | tr -d ' \n'; }
 
 env_value() { # env_value <file> <KEY>  -> value, empty if unset or commented out
@@ -554,10 +556,12 @@ POLICY_CUSTOM="$ETC_DIR/policy-custom.json"
 choose_policy() {
   local current="" choice
   [[ -f "$POLICY_CONF" ]] && current="$(env_value "$POLICY_CONF" POLICY)"
-  current="${OTB_POLICY:-${current:-otomatis}}"
+  local fallback=otomatis
+  [[ -n "$(rw_shares)" ]] && fallback=penuh
+  current="${OTB_POLICY:-${current:-$fallback}}"
   if [[ $INTERACTIVE -eq 1 && ( ! -f "$POLICY_CONF" || $RECONFIGURE -eq 1 ) ]]; then
     local def=1
-    case "$current" in seimbang) def=2 ;; ketat) def=3 ;; custom) def=4 ;; esac
+    case "$current" in seimbang) def=2 ;; ketat) def=3 ;; penuh) def=4 ;; custom) def=5 ;; esac
     cat >/dev/tty <<'EOF'
 
 Persetujuan perintah (bisa diganti kapan saja: otb policy)
@@ -565,13 +569,15 @@ Persetujuan perintah (bisa diganti kapan saja: otb policy)
                  akses jaringan, ubah database, kill proses)
   2) seimbang  - perintah baca & build/test umum jalan sendiri; lainnya ditanya
   3) ketat     - hampir semua perintah ditanya
+  4) penuh     - tidak ada yang ditanya (kecuali git push); pengamannya snapshot file
+                 tiap 5 menit dan backup database tiap jam (otomatis untuk folder --write)
 EOF
-    [[ -f "$POLICY_CUSTOM" ]] && printf '  4) custom    - %s\n' "$POLICY_CUSTOM" >/dev/tty
+    [[ -f "$POLICY_CUSTOM" ]] && printf '  5) custom    - %s\n' "$POLICY_CUSTOM" >/dev/tty
     choice="$(ask "  Pilih" "$def")"
-    case "$choice" in 2|seimbang) current=seimbang ;; 3|ketat) current=ketat ;; 4|custom) current=custom ;; *) current=otomatis ;; esac
+    case "$choice" in 2|seimbang) current=seimbang ;; 3|ketat) current=ketat ;; 4|penuh) current=penuh ;; 5|custom) current=custom ;; 1|otomatis) current=otomatis ;; *) current=otomatis ;; esac
   fi
-  case "$current" in otomatis|seimbang|ketat) ;; custom) [[ -f "$POLICY_CUSTOM" ]] || die "Preset custom butuh $POLICY_CUSTOM" ;;
-    *) die "Kebijakan tidak dikenal: $current (otomatis|seimbang|ketat|custom)" ;; esac
+  case "$current" in otomatis|seimbang|ketat|penuh) ;; custom) [[ -f "$POLICY_CUSTOM" ]] || die "Preset custom butuh $POLICY_CUSTOM" ;;
+    *) die "Kebijakan tidak dikenal: $current (otomatis|seimbang|ketat|penuh|custom)" ;; esac
   conf_set "$POLICY_CONF" POLICY "$current"
 }
 
@@ -600,10 +606,11 @@ apply_policy() {
       const fs = require("fs"); const f = process.argv[1];
       const c = JSON.parse(fs.readFileSync(f, "utf8")); const p = c.permission;
       for (const tool of ["read", "edit"]) {
-        if (p[tool] && typeof p[tool] === "object") for (const k of ["*.env", "*.env.*"]) p[tool][k] = "ask";
+        if (p[tool] && typeof p[tool] === "object") for (const k of ["*.env", "*.env.*"]) if (p[tool][k] === "deny") p[tool][k] = "ask";
       }
       fs.writeFileSync(f, JSON.stringify(c, null, 2) + "\n");' "$MANAGED_CONFIG"
-    log "Kebijakan persetujuan: $name (+ .env boleh dibaca/diedit setelah disetujui)"
+    if [[ "$name" == penuh ]]; then log "Kebijakan persetujuan: $name"
+    else log "Kebijakan persetujuan: $name (+ .env boleh dibaca/diedit setelah disetujui)"; fi
   else
     log "Kebijakan persetujuan: $name"
   fi
@@ -887,6 +894,26 @@ save_install_conf() {
   ln -sfn "$REPO_DIR/otb" /usr/local/bin/otb
 }
 
+# Snapshots + database backups for writable shares (lib/safety.sh); first run happens now.
+setup_safety_nets() {
+  local p snap bk
+  [[ "$MODE" == systemd ]] || return 0
+  safety_load
+  while read -r p; do db_info "$p" && ensure_db_tools "$DB_CONNECTION"; done < <(rw_shares)
+  # otb must be on PATH for the timers before they first fire.
+  ln -sfn "$REPO_DIR/otb" /usr/local/bin/otb
+  install_safety_timers
+  while read -r p; do
+    snap="$(snapshot_one "$p" "awal (instalasi)")"
+    ok "Snapshot file $p: ${snap:0:7}${snap:+ }(tiap 5 menit, disimpan $SNAPSHOT_KEEP_DAYS hari)"
+    if bk="$(backup_one "$p")" && [[ -n "$bk" ]]; then
+      ok "Backup database $p: $(basename "$bk") (tiap jam)"
+    else
+      warn "Backup database $p belum berhasil; cek: otb backup $p"
+    fi
+  done < <(rw_shares)
+}
+
 # Option A: repositories to clone into the workspace right away (more later: otb clone <url>).
 clone_repos() {
   local urls="${OTB_CLONE:-}" u name
@@ -915,6 +942,7 @@ main() {
   configure_model
   configure_shares
   apply_shares
+  setup_safety_nets
   write_agent_gitconfig
   choose_policy
   apply_policy

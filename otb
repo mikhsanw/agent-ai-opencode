@@ -16,6 +16,8 @@ COMPOSE=(docker compose -f "$REPO_DIR/docker-compose.yml")
 ETC_DIR=/etc/otb
 # shellcheck source=lib/shares.sh
 source "$REPO_DIR/lib/shares.sh"
+# shellcheck source=lib/safety.sh
+source "$REPO_DIR/lib/safety.sh"
 # The installer code is owned by root; without this, git refuses it for other users
 # ("dubious ownership"). Read-only use by non-root (otb version) is safe.
 repo_git() { git -c safe.directory="$REPO_DIR" -C "$REPO_DIR" "$@"; }
@@ -37,6 +39,13 @@ Pemakaian: otb <perintah>
   shares               daftar folder di luar workspace yang boleh diakses agen
   share <path> [--write]  izinkan agen membaca (atau --write: menulis, termasuk .env & database)
   unshare <path>       cabut akses agen ke folder itu
+  snapshots <folder>   daftar snapshot file (otomatis tiap 5 menit untuk folder --write)
+  snapshot <folder>    buat snapshot sekarang
+  restore <folder> <id>  kembalikan file ke snapshot itu (termasuk .git jika terhapus)
+  restore-git <folder> pulihkan riwayat git dari salinan (commit yang dibuang reset/gc)
+  backups <folder>     daftar backup database (otomatis tiap jam)
+  backup <folder>      backup database sekarang
+  restore-db <folder> <file>  pulihkan database dari backup
   reconfigure          ganti token, user ID, model, atau API key
   update [tag]         perbarui ke rilis terbaru (atau tag tertentu)
   uninstall [--purge]  hapus layanan; --purge juga menghapus konfigurasi dan workspace
@@ -143,6 +152,7 @@ cmd_policy() {
   otomatis  jalan sendiri; hanya yang penting ditanya (hapus file, reset git, jaringan, database, kill)
   seimbang  perintah baca & build/test umum jalan sendiri; lainnya ditanya
   ketat     hampir semua perintah ditanya
+  penuh     tidak ada yang ditanya kecuali git push; pengaman: snapshot & backup otomatis
   custom    pakai $custom apa adanya (buat dari preset aktif: otb policy custom)
 
 Semua preset tetap memblokir: git push, sudo, ssh/scp, docker, systemctl, crontab, akses di luar proyek.
@@ -151,7 +161,7 @@ EOF
     return 0
   fi
   case "$name" in
-    otomatis|seimbang|ketat)
+    otomatis|seimbang|ketat|penuh)
       src="$REPO_DIR/config/policies/$name.json"
       grep -q '^PUSH=1' "$conf" 2>/dev/null && src="$REPO_DIR/config/policies/$name-push.json" ;;
     custom)
@@ -161,7 +171,7 @@ EOF
         return 0
       fi
       src="$custom" ;;
-    *) die "Kebijakan tidak dikenal: $name (otomatis | seimbang | ketat | custom)" ;;
+    *) die "Kebijakan tidak dikenal: $name (otomatis | seimbang | ketat | penuh | custom)" ;;
   esac
   if command -v python3 >/dev/null; then
     python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "$src" 2>/dev/null || die "$src bukan JSON yang valid."
@@ -339,6 +349,83 @@ cmd_unshare() {
   reapply || die "Gagal menerapkan konfigurasi."
 }
 
+# ---------------------------------------------------------------- safety nets
+for_targets() { # for_targets <fn> <--all|folder>
+  local f="$1" t="${2:-}" p
+  if [[ -z "$t" || "$t" == --all ]]; then
+    while read -r p; do "$f" "$p"; done < <(rw_shares)
+  else
+    "$f" "$(resolve_share "$t")"
+  fi
+}
+
+cmd_snapshot() {
+  local target="" quiet=0 a
+  for a in "$@"; do case "$a" in --quiet|-q) quiet=1 ;; *) target="$a" ;; esac; done
+  safety_load
+  _snap() { local c; c="$(snapshot_one "$1" "${OTB_SNAP_MSG:-otomatis}")"; snapshot_prune "$1"
+    [[ $quiet -eq 1 ]] || { if [[ -n "$c" ]]; then log "Snapshot $1: ${c:0:7}"; else log "Snapshot $1: tidak ada perubahan"; fi; }; }
+  OTB_SNAP_MSG="$([[ -z "$target" || "$target" == --all ]] && echo otomatis || echo manual)" for_targets _snap "$target"
+}
+
+cmd_snapshots() {
+  local p; p="$(resolve_share "${1:?Pemakaian: otb snapshots <folder>}")"
+  echo "Snapshot file $p (terbaru di atas; pulihkan: otb restore $(basename "$p") <id>):"
+  snapshot_list "$p" | head -n "${2:-30}" | sed 's/^/  /'
+}
+
+cmd_restore() {
+  local p id a
+  p="$(resolve_share "${1:?Pemakaian: otb restore <folder> <id>}")"; id="${2:?Pemakaian: otb restore <folder> <id>}"
+  snap_git "$p" rev-parse -q --verify "$id^{commit}" >/dev/null || die "Snapshot tidak ditemukan: $id (lihat: otb snapshots $(basename "$p"))"
+  safety_load; snapshot_one "$p" "sebelum melihat diff" >/dev/null
+  echo "Perubahan yang akan terjadi pada $p (kondisi sekarang -> snapshot $id):"
+  snap_git "$p" diff --stat "$(snap_git "$p" for-each-ref --sort=-committerdate --count=1 --format='%(objectname)' refs/heads/)" "$id" | tail -n 25 | sed 's/^/  /'
+  read -r -p "Ketik 'yes' untuk mengembalikan file ke snapshot ini: " a </dev/tty || a=""
+  [[ "$a" == yes ]] || { log "Dibatalkan."; return 0; }
+  snapshot_restore "$p" "$id"
+}
+
+cmd_restore_git() {
+  local p a
+  p="$(resolve_share "${1:?Pemakaian: otb restore-git <folder>}")"
+  cat <<EOF
+Riwayat git $p akan diganti dengan salinan yang menyimpan SEMUA commit yang pernah ada
+(.git yang sekarang dipindah ke samping, tidak dihapus). File kerja tidak diubah.
+Setelahnya, cari commit yang hilang dengan: git fsck --lost-found  atau  git reflog
+EOF
+  read -r -p "Ketik 'yes' untuk melanjutkan: " a </dev/tty || a=""
+  [[ "$a" == yes ]] || { log "Dibatalkan."; return 0; }
+  safety_load; snapshot_replace_dotgit "$p"
+}
+
+cmd_backup() {
+  local target="" quiet=0 a
+  for a in "$@"; do case "$a" in --quiet|-q) quiet=1 ;; *) target="$a" ;; esac; done
+  safety_load
+  _bk() { local f; if f="$(backup_one "$1")"; then backup_prune "$1"; [[ $quiet -eq 1 || -z "$f" ]] || log "Backup database $1: $f"; else return 1; fi; }
+  for_targets _bk "$target"
+}
+
+cmd_backups() {
+  local p; p="$(resolve_share "${1:?Pemakaian: otb backups <folder>}")"
+  echo "Backup database $p (terbaru di atas; pulihkan: otb restore-db $(basename "$p") <file>):"
+  backup_list "$p" | sed 's/^/  /'
+}
+
+cmd_restore_db() {
+  local p f a
+  p="$(resolve_share "${1:?Pemakaian: otb restore-db <folder> <file>}")"; f="${2:?Pemakaian: otb restore-db <folder> <file>}"
+  db_info "$p" || die "Tidak ada $p/.env."
+  cat <<EOF
+PERHATIAN: database $DB_DATABASE ($DB_CONNECTION) akan DITIMPA dengan isi $f.
+Semua perubahan data setelah backup itu hilang (kondisi sekarang dibackup dulu otomatis).
+EOF
+  read -r -p "Ketik 'yes' untuk memulihkan: " a </dev/tty || a=""
+  [[ "$a" == yes ]] || { log "Dibatalkan."; return 0; }
+  safety_load; backup_restore "$p" "$f"
+}
+
 cmd_clone() {
   local url="${1:-}" name="${2:-}"
   [[ -n "$url" ]] || die "Pemakaian: otb clone <url> [nama-folder]"
@@ -392,8 +479,13 @@ EOF
   read -r -p "Ketik 'yes' untuk melanjutkan: " reply </dev/tty || reply=""
   [[ "$reply" == "yes" ]] || { log "Dibatalkan."; return 0; }
 
-  local sp
+  local sp u
   while read -r _ sp; do share_revoke "$sp"; done < <(shares_list "$SHARES_APPLIED")
+  for u in otb-snapshot otb-backup; do
+    systemctl disable --now "$u.timer" >/dev/null 2>&1 || true
+    rm -f "/etc/systemd/system/$u.timer" "/etc/systemd/system/$u.service"
+  done
+  [[ -d "$SNAP_ROOT" || -d "$BACKUP_ROOT" ]] && log "Snapshot ($SNAP_ROOT) dan backup database ($BACKUP_ROOT) TIDAK dihapus; hapus manual jika sudah tidak perlu."
   if [[ "$MODE" == "systemd" ]]; then
     systemctl disable --now otb-bot.service otb-agent.service 2>/dev/null || true
     rm -f /etc/systemd/system/otb-bot.service /etc/systemd/system/otb-agent.service
@@ -421,6 +513,13 @@ case "$cmd" in
   clone) need_root clone "$@"; cmd_clone "$@" ;;
   attach) need_root attach; cmd_attach ;;
   shares) cmd_shares ;;
+  snapshot) need_root snapshot "$@"; cmd_snapshot "$@" ;;
+  snapshots) need_root snapshots "$@"; cmd_snapshots "$@" ;;
+  restore) need_root restore "$@"; cmd_restore "$@" ;;
+  restore-git) need_root restore-git "$@"; cmd_restore_git "$@" ;;
+  backup) need_root backup "$@"; cmd_backup "$@" ;;
+  backups) need_root backups "$@"; cmd_backups "$@" ;;
+  restore-db) need_root restore-db "$@"; cmd_restore_db "$@" ;;
   share) need_root share "$@"; cmd_share "$@" ;;
   unshare) need_root unshare "$@"; cmd_unshare "$@" ;;
   github-key)

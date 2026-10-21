@@ -21,7 +21,7 @@ PUSH_DENY = [
     "*/git push *--force*", "*/git push * -f*",
 ]
 
-for base in ("otomatis", "seimbang", "ketat"):
+for base in ("penuh", "otomatis", "seimbang", "ketat"):
     policy = json.loads((ROOT / f"{base}.json").read_text())
     bash = policy["permission"]["bash"]
     rules = {k: v for k, v in bash.items() if k not in PUSH_ASK + PUSH_DENY}

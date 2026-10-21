@@ -37,6 +37,8 @@ ReadOnlyPaths=/var/lib/otb-agent/.opencode
 PrivateTmp=yes
 # The bot's secrets and code are invisible to the agent.
 InaccessiblePaths=-/etc/otb/bot.env -/var/lib/otb-bot -/opt/otb/bot
+# Snapshots and database backups (safety nets for shared folders) must stay out of reach.
+InaccessiblePaths=-/var/lib/otb -/var/backups/otb
 
 # --- Privileges: no root, no capabilities, no way to regain them.
 NoNewPrivileges=yes
