@@ -1,7 +1,7 @@
 # PRD — agent-ai-opencode v2
 
-Status: **v1.3, disetujui** (23 Okt 2026) · Pemilik: Muhammad Ikhsan Wibowo
-Menggantikan isi repo lama (V1), yang disimpan utuh di branch `legacy`.
+Status: **v1.4, disetujui** (23 Okt 2026) · Pemilik: Muhammad Ikhsan Wibowo
+Menggantikan seluruh isi repo lama (V1). Kode V1 disimpan di branch `legacy` dan **tidak dipakai ulang** (keputusan pemilik: tidak ada bagian yang cocok).
 
 ---
 
@@ -33,7 +33,7 @@ Inspirasi fitur: Hermes Agent (memori yang dikurasi agen, skill yang tumbuh dari
 **Masuk**
 - Paket memori (`packages/memory`): store SQLite FTS5, dedup, pemindai rahasia, tag `<private>`, batas ukuran, audit + undo, snapshot instruksi, MCP HTTP, store skill hasil belajar, ekstraktor auto-capture.
 - Fork bot (`bot/`, dari `grinev/opencode-telegram-bot`): memori berjalan di dalam proses bot; perintah `/memory`, `/forget`, `/recall`, `/skills_pending`; tombol approval skill; digest harian; pemicu auto-capture.
-- Installer, hardening, `doctor`, `update` untuk OpenCode V2 (port dari repo lama).
+- Installer, sandbox, `doctor`, `update` untuk OpenCode V2 (ditulis baru).
 
 **Keluar**
 - Multi-platform (Discord, WhatsApp, dst.), dukungan OpenCode V1, RL/trajectory, impor OpenClaw, multi-user, web UI.
@@ -100,34 +100,35 @@ Telegram ──► aao-bot (fork grinev, user OS aao-bot)
 1. **Paket memori** + unit test + e2e terhadap OpenCode V2 dengan mock model. ✅ (88 unit test; e2e 15 pemeriksaan, 10/10 run lulus; lihat `packages/memory/README.md`)
 2. **Integrasi bot**: fork grinev sebagai subtree, pasang paket memori, perintah Telegram, approval skill, pemicu auto-capture, digest harian, prosedur kesiapan K15 sebelum meneruskan prompt pertama per lokasi. Ukur RSS bot + memori (S8).
 3. **Recall sesi**: indexer FTS5 atas riwayat sesi (V2 Sessions API, cursor) + `/recall`.
-4. **Installer & hardening**: port dari `legacy` ke V2, `doctor`, `update`, `verify.sh` versi V2.
+4. **Installer & sandbox**: ditulis baru untuk V2 (bukan port dari `legacy`): installer satu perintah, dua user OS dengan sandbox systemd, batas memori, `doctor`, `update`, uji serangan.
 5. **Uji lapangan** di VPS: ulang `zen-memory-test` (S2), uji serangan (S5), ukur RAM (S8). Setelah lulus → PR keluar dari draft → merge → tag `v2.0.0`.
 
-## 8. Yang dibawa dari repo lama (`legacy`)
+## 8. Repo lama dan kondisi VPS
 
-- Model **dua user OS** dan unit systemd berlapis (`ProtectSystem=strict`, `InaccessiblePaths`, `NoNewPrivileges`, `MemoryMax`, dst.) → diport, ganti `otb-*` menjadi `aao-*`.
-- Pola `verify.sh` (uji serangan nyata) → diport ke V2.
-- Wizard 3 pertanyaan, verifikasi SHA256 Node.js, mode non-interaktif.
-- Preset izin → dikonversi ke format V2 (`permission` → `permissions[]`, `bash` → `shell`).
-- Temuan V1: plugin di `.opencode/plugins/` repo dieksekusi otomatis tanpa izin. **Harus diuji ulang di V2** (V2 juga auto-discover `.opencode/plugins/`; perlu cek apakah `OPENCODE_DISABLE_PROJECT_CONFIG` masih ada). Jika bisa dimatikan, ini juga menutup serangan shadowing skill proyek (K5).
+**Repo lama (`legacy`)**: tidak ada yang dibawa (keputusan pemilik, 23 Okt). Tidak di-port: preset izin, auto-share proyek, snapshot file/backup database, mode Docker, perintah `otb`. Satu temuan V1 tetap dicatat sebagai hal yang **wajib diuji ulang** di V2 karena menyangkut keamanan: plugin di `.opencode/plugins/` repo yang di-clone dieksekusi otomatis tanpa izin. V2 juga auto-discover direktori itu; perlu dicek apakah bisa dimatikan (dulu `OPENCODE_DISABLE_PROJECT_CONFIG`). Jika bisa, ini sekaligus menutup serangan shadowing skill proyek (K5).
 
-Belum diputuskan untuk dibawa: auto-share proyek, snapshot file/backup database, mode Docker.
+**VPS bersama** (`ps`, 23 Okt): VPS ini juga menjalankan **freqtrade** (bot trading, ~534 MB, terbesar), OpenCode lama (~198 MB), PM2 (~48 MB), dan agen monitoring penyedia. RAM total 1,9 GiB, swap 1,3 GiB sudah terpakai.
+
+Konsekuensi yang menjadi syarat v2 (ditulis baru, bukan warisan V1):
+- **Agen tidak boleh bisa membaca konfigurasi/kunci API freqtrade atau mengganggu prosesnya.** Agen punya shell; tanpa sandbox, prompt injection dari satu README bisa mencuri kunci exchange. Karena itu dua user OS + sandbox systemd (`InaccessiblePaths` untuk direktori freqtrade, `ProtectHome`, `NoNewPrivileges`) tetap wajib.
+- **OpenCode tidak boleh memicu OOM yang membunuh freqtrade.** OOM killer kernel memilih proses dengan RSS terbesar, yaitu freqtrade. Mitigasi: `MemoryMax` untuk service agen (OOM terjadi di dalam cgroup agen), `OOMScoreAdjust` positif untuk agen, batas heap Node (K16).
+- Anggaran RAM v2: OpenCode V2 ~150–330 MB (terukur) + bot dan memori (target ≤ 150 MB, S8). OpenCode V1 dimatikan saat v2 terpasang.
 
 ## 9. Risiko
 
 | Risiko | Mitigasi |
 |---|---|
 | Memori diracuni prompt injection (memori otomatis) | Header snapshot "data, bukan instruksi"; digest harian; `/forget`; undo |
-| Skill native ditanam/dibayangi agen | K5 + allowlist aksi `skill`; uji ulang `OPENCODE_DISABLE_PROJECT_CONFIG` di V2 |
+| Skill native ditanam/dibayangi agen | K5 + allowlist aksi `skill`; uji ulang penonaktifan config/plugin proyek di V2 |
 | Tool memori belum ada di katalog saat prompt pertama setelah restart (teramati: "Unknown tool") | Prosedur kesiapan K15; auto-capture sebagai jaring pengaman; pesan error OpenCode sendiri menyuruh model mencari tool lalu mencoba lagi |
 | Perubahan memori terlambat sampai ke sesi baru | Diukur: OpenCode mendeteksi perubahan file instruksi dalam ~50–100 ms; sesi yang dibuat dalam jendela itu mendapat isi lama. Dampak praktis nihil (jeda antar pesan Telegram = detik); sesi yang sedang berjalan menerima pembaruan lewat `<system-update>` |
 | Biaya token: perubahan memori disalin ke setiap sesi aktif | Batas 4.000 karakter + konsolidasi |
 | `generate` mengembalikan teks kosong bila model memaksa tool call | Anggap "tidak ada fakta"; dicatat di log |
-| RAM VPS tipis (swap sudah terpakai) | Ukur proses yang berjalan; `MemoryMax` untuk OpenCode |
+| RAM VPS tipis dan dipakai bersama freqtrade (bot trading) | `MemoryMax` + `OOMScoreAdjust` untuk agen, batas heap Node, matikan OpenCode V1; opsi terbaik tetap VPS terpisah untuk agen |
+| Agen yang disusupi membaca kunci exchange freqtrade | Dua user OS + `InaccessiblePaths`/`ProtectHome`; diuji di fase 4 |
 | Upstream bot terus berubah | Patch tipis di titik integrasi; subtree dengan remote `upstream` |
 
 ## 10. Pertanyaan terbuka
 
-1. Apa yang dirasa kurang cocok dari repo lama? (supaya tidak terulang di v2)
-2. Proses apa yang sedang memakai RAM di VPS (`ps -eo rss,comm --sort=-rss | head`)?
-3. Bawa atau tidak: auto-share proyek, snapshot/backup database, mode Docker.
+1. Agen tetap di VPS yang sama dengan freqtrade, atau VPS terpisah? (lihat §8)
+2. Lokasi instalasi freqtrade (path dan user), untuk diblokir dari sandbox agen.
