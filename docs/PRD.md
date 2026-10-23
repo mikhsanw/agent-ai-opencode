@@ -57,6 +57,8 @@ Inspirasi fitur: Hermes Agent (memori yang dikurasi agen, skill yang tumbuh dari
 | K12 | Riwayat & undo memori lewat **tabel audit SQLite**, bukan git | Fungsi sama (riwayat + undo), tanpa proses `git` per tulis |
 | K13 | Repo: kerja di branch `v2-rewrite`, masuk `main` lewat PR; **tanpa force-push dan tanpa tag `v*`** sampai installer v2 siap | Installer lama mengikuti `main`/tag `v*` saat `otb update` |
 | K14 | Provider model: **OpenCode Zen** | Pilihan pemilik |
+| K15 | Kesiapan MCP sebelum prompt pertama per lokasi: **picu lokasi (`GET /api/mcp?directory=…`) → tunggu request `tools/list` di server MCP kita → margin 1 detik** | Diukur di 2.1.2: status `connected` muncul sebelum katalog Code Mode berisi tool kita (prompt pertama mendapat "Unknown tool"); lokasi dimuat malas dan `tools/list` baru datang setelah dipicu; setelah `tools/list` katalog butuh ≤ 250 ms (0 ms: gagal 3/3, 250 ms: lulus 3/3). E2E dengan prosedur ini: 10/10 lulus |
+| K16 | Proses Node dijalankan dengan batas heap (`--max-old-space-size`, `--max-semi-space-size=2`) | Server memori mandiri: 85 MB idle → 169 MB setelah 1.600 request tanpa batas (GC malas); dengan heap 48 MB tertahan 93–96 MB selama 3.600 request, tanpa crash (bukan kebocoran) |
 
 ## 5. Arsitektur
 
@@ -95,8 +97,8 @@ Telegram ──► aao-bot (fork grinev, user OS aao-bot)
 
 ## 7. Fase
 
-1. **Paket memori** + unit test + e2e terhadap OpenCode V2 dengan mock model. ← *sekarang*
-2. **Integrasi bot**: fork grinev sebagai subtree, pasang paket memori, perintah Telegram, approval skill, pemicu auto-capture, digest harian, tunggu MCP `connected` sebelum meneruskan prompt.
+1. **Paket memori** + unit test + e2e terhadap OpenCode V2 dengan mock model. ✅ (88 unit test; e2e 15 pemeriksaan, 10/10 run lulus; lihat `packages/memory/README.md`)
+2. **Integrasi bot**: fork grinev sebagai subtree, pasang paket memori, perintah Telegram, approval skill, pemicu auto-capture, digest harian, prosedur kesiapan K15 sebelum meneruskan prompt pertama per lokasi. Ukur RSS bot + memori (S8).
 3. **Recall sesi**: indexer FTS5 atas riwayat sesi (V2 Sessions API, cursor) + `/recall`.
 4. **Installer & hardening**: port dari `legacy` ke V2, `doctor`, `update`, `verify.sh` versi V2.
 5. **Uji lapangan** di VPS: ulang `zen-memory-test` (S2), uji serangan (S5), ukur RAM (S8). Setelah lulus → PR keluar dari draft → merge → tag `v2.0.0`.
@@ -117,7 +119,8 @@ Belum diputuskan untuk dibawa: auto-share proyek, snapshot file/backup database,
 |---|---|
 | Memori diracuni prompt injection (memori otomatis) | Header snapshot "data, bukan instruksi"; digest harian; `/forget`; undo |
 | Skill native ditanam/dibayangi agen | K5 + allowlist aksi `skill`; uji ulang `OPENCODE_DISABLE_PROJECT_CONFIG` di V2 |
-| MCP belum tersambung saat prompt pertama setelah restart (teramati: "Unknown tool") | Bot menunggu status MCP `connected` |
+| Tool memori belum ada di katalog saat prompt pertama setelah restart (teramati: "Unknown tool") | Prosedur kesiapan K15; auto-capture sebagai jaring pengaman; pesan error OpenCode sendiri menyuruh model mencari tool lalu mencoba lagi |
+| Perubahan memori terlambat sampai ke sesi baru | Diukur: OpenCode mendeteksi perubahan file instruksi dalam ~50–100 ms; sesi yang dibuat dalam jendela itu mendapat isi lama. Dampak praktis nihil (jeda antar pesan Telegram = detik); sesi yang sedang berjalan menerima pembaruan lewat `<system-update>` |
 | Biaya token: perubahan memori disalin ke setiap sesi aktif | Batas 4.000 karakter + konsolidasi |
 | `generate` mengembalikan teks kosong bila model memaksa tool call | Anggap "tidak ada fakta"; dicatat di log |
 | RAM VPS tipis (swap sudah terpakai) | Ukur proses yang berjalan; `MemoryMax` untuk OpenCode |
