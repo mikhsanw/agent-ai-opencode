@@ -1,0 +1,839 @@
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import type { Bot, Context } from "grammy";
+import type { FilePartInput } from "@opencode-ai/sdk/v2";
+import {
+  admitPromptToInbox,
+  getPromptResponseMode,
+  processUserPrompt as processIncomingPrompt,
+  type ProcessPromptDeps,
+} from "../../../src/bot/handlers/prompt.js";
+import { promptAttachment } from "../../../src/app/managers/prompt-attachment-manager.js";
+import { createIncomingPrompt } from "../../../src/app/types/prompt.js";
+import { t } from "../../../src/i18n/index.js";
+import { logger } from "../../../src/utils/logger.js";
+import type { AppContainer } from "../../../src/app/bootstrap/app-container.js";
+import { createTestAppContainer } from "../../helpers/app-container.js";
+import { defined } from "../../helpers/defined.js";
+
+const mocked = vi.hoisted(() => ({
+  resolvePendingAttachmentMock: vi.fn(),
+  getMissingFolderNoticeMock: vi.fn(),
+  interactionClearMock: vi.fn(),
+  editMessageReplyMarkupMock: vi.fn(),
+  currentProject: { id: "project-1", worktree: "D:\\Projects\\Repo" },
+  currentSession: {
+    id: "session-1",
+    title: "Session",
+    directory: "D:\\Projects\\Repo",
+  } as { id: string; title: string; directory: string } | null,
+  sessionStatusMock: vi.fn(),
+  sessionPromptMock: vi.fn(),
+  sessionPromptAsyncMock: vi.fn(),
+  sessionCreateMock: vi.fn(),
+  suppressionRegisterMock: vi.fn(),
+  safeBackgroundTaskMock: vi.fn(),
+  setSessionSummaryMock: vi.fn(),
+  setBotAndChatIdMock: vi.fn(),
+  attachToSessionMock: vi.fn(),
+  getTtsModeMock: vi.fn(),
+}));
+
+vi.mock("../../../src/opencode/client.js", () => ({
+  opencodeClient: {
+    session: {
+      status: mocked.sessionStatusMock,
+      prompt: mocked.sessionPromptMock,
+      promptAsync: mocked.sessionPromptAsyncMock,
+      create: mocked.sessionCreateMock,
+    },
+  },
+}));
+
+vi.mock("../../../src/app/services/session-service.js", () => ({
+  getCurrentSession: vi.fn(() => mocked.currentSession),
+  setCurrentSession: vi.fn(),
+  clearSession: vi.fn(),
+}));
+
+vi.mock("../../../src/app/services/session-cache-service.js", () => ({
+  ingestSessionInfoForCache: vi.fn(),
+  __resetSessionDirectoryCacheForTests: vi.fn(),
+}));
+
+vi.mock("../../../src/app/stores/settings-store.js", () => ({
+  getCurrentProject: vi.fn(() => mocked.currentProject),
+  getTtsMode: mocked.getTtsModeMock,
+}));
+
+vi.mock("../../../src/app/services/agent-selection-service.js", () => ({
+  getStoredAgent: vi.fn(() => "build"),
+  resolveProjectAgent: vi.fn(async (agentName?: string) => agentName ?? "build"),
+}));
+
+vi.mock("../../../src/app/services/model-selection-service.js", () => ({
+  getStoredModel: vi.fn(() => ({
+    providerID: "openai",
+    modelID: "gpt-5",
+    variant: "default",
+  })),
+}));
+
+vi.mock("../../../src/utils/safe-background-task.js", () => ({
+  safeBackgroundTask: vi.fn((options) => {
+    mocked.safeBackgroundTaskMock(options);
+  }),
+}));
+
+vi.mock("../../../src/utils/error-format.js", () => ({
+  formatErrorDetails: vi.fn(() => "formatted error"),
+}));
+
+vi.mock("../../../src/app/services/attach-service.js", () => ({
+  attachToSession: mocked.attachToSessionMock,
+  detachAttachedSession: vi.fn(),
+  markAttachedSessionBusy: vi.fn().mockResolvedValue(undefined),
+  markAttachedSessionIdle: vi.fn().mockResolvedValue(undefined),
+}));
+
+vi.mock("../../../src/app/services/missing-folder-notice-service.js", () => ({
+  getMissingFolderNotice: mocked.getMissingFolderNoticeMock,
+}));
+
+// The resolver has its own suite; here only the wiring around it is under test.
+vi.mock("../../../src/app/services/prompt-attachment-service.js", () => ({
+  resolvePendingAttachment: mocked.resolvePendingAttachmentMock,
+}));
+
+function createContext(): Context {
+  return {
+    chat: { id: 777 },
+    reply: vi.fn().mockResolvedValue({ message_id: 100 }),
+    api: { editMessageReplyMarkup: mocked.editMessageReplyMarkupMock },
+  } as unknown as Context;
+}
+
+function createDeps(): ProcessPromptDeps {
+  return {
+    ...container,
+    pinnedMessageManager: {
+      isInitialized: vi.fn(() => true),
+      initialize: vi.fn(),
+      getState: vi.fn(() => ({ messageId: 1 })),
+      onSessionChange: vi.fn(),
+      clear: vi.fn(),
+      getContextInfo: vi.fn(() => null),
+    } as unknown as AppContainer["pinnedMessageManager"],
+    keyboardManager: {
+      initialize: vi.fn(),
+      clearContext: vi.fn(),
+      updateAgent: vi.fn(),
+    } as unknown as AppContainer["keyboardManager"],
+    summaryAggregator: {
+      setSession: mocked.setSessionSummaryMock,
+      setBotAndChatId: mocked.setBotAndChatIdMock,
+      clear: vi.fn(),
+    } as unknown as AppContainer["summaryAggregator"],
+    interactionManager: {
+      clear: mocked.interactionClearMock,
+      getSnapshot: vi.fn(() => null),
+    } as unknown as AppContainer["interactionManager"],
+    resetInteractions: vi.fn(),
+    resetAggregator: vi.fn(),
+    foregroundSessionState: {
+      markBusy: vi.fn(),
+      markIdle: vi.fn(),
+      clearAll: vi.fn(),
+    } as unknown as AppContainer["foregroundSessionState"],
+    assistantRunState: {
+      startRun: vi.fn(),
+      clearRun: vi.fn(),
+      clearAll: vi.fn(),
+    } as unknown as AppContainer["assistantRunState"],
+    externalUserInputSuppressionManager: {
+      register: mocked.suppressionRegisterMock,
+    } as unknown as AppContainer["externalUserInputSuppressionManager"],
+    bot: { api: { sendMessage: vi.fn().mockResolvedValue(undefined) } } as unknown as Bot<Context>,
+    ensureEventSubscription: vi.fn().mockResolvedValue(undefined),
+  };
+}
+
+function processUserPrompt(
+  ctx: Context,
+  text: string,
+  deps: ProcessPromptDeps,
+  fileParts: FilePartInput[] = [],
+  options: { responseMode?: "text_only" | "text_and_tts" } = {},
+): Promise<boolean> {
+  return processIncomingPrompt(ctx, createIncomingPrompt(text, { fileParts }), deps, options);
+}
+
+function getScheduledBackgroundTask(): {
+  task: () => Promise<unknown>;
+  onSuccess?: (value: { error: unknown | null }) => void;
+  onError?: (error: unknown) => void;
+} {
+  const [[options]] = mocked.safeBackgroundTaskMock.mock.calls as [
+    [
+      {
+        task: () => Promise<unknown>;
+        onSuccess?: (value: { error: unknown | null }) => void;
+        onError?: (error: unknown) => void;
+      },
+    ],
+  ];
+
+  return options;
+}
+
+let container: AppContainer;
+
+beforeEach(() => {
+  container = createTestAppContainer();
+});
+
+describe("bot/handlers/prompt", () => {
+  beforeEach(() => {
+    container.attachManager.attach("session-1", "D:\\Projects\\Repo");
+    mocked.currentProject = { id: "project-1", worktree: "D:\\Projects\\Repo" };
+    mocked.currentSession = {
+      id: "session-1",
+      title: "Session",
+      directory: "D:\\Projects\\Repo",
+    };
+    mocked.sessionStatusMock.mockReset();
+    mocked.sessionPromptMock.mockReset();
+    mocked.sessionPromptAsyncMock.mockReset();
+    mocked.sessionCreateMock.mockReset();
+    mocked.suppressionRegisterMock.mockReset();
+    mocked.safeBackgroundTaskMock.mockReset();
+    mocked.setSessionSummaryMock.mockReset();
+    mocked.setBotAndChatIdMock.mockReset();
+    mocked.attachToSessionMock.mockReset();
+    mocked.getTtsModeMock.mockReset();
+    mocked.getTtsModeMock.mockReturnValue("off");
+    mocked.attachToSessionMock.mockResolvedValue({
+      busy: false,
+      alreadyAttached: false,
+      restoredQuestion: false,
+      restoredPermissions: 0,
+    });
+
+    mocked.sessionStatusMock.mockResolvedValue({
+      data: {
+        "session-1": { type: "idle" },
+      },
+      error: null,
+    });
+    mocked.sessionPromptMock.mockResolvedValue({ data: {}, error: null });
+    mocked.sessionPromptAsyncMock.mockResolvedValue({ data: {}, error: null });
+    mocked.resolvePendingAttachmentMock.mockReset();
+    mocked.resolvePendingAttachmentMock.mockResolvedValue(null);
+    mocked.editMessageReplyMarkupMock.mockReset();
+    mocked.editMessageReplyMarkupMock.mockResolvedValue(undefined);
+    mocked.getMissingFolderNoticeMock.mockReset().mockResolvedValue(null);
+  });
+
+  describe("project folder gone", () => {
+    beforeEach(() => {
+      mocked.getMissingFolderNoticeMock.mockResolvedValue("folder gone notice");
+    });
+
+    it("answers with the notice and sends nothing", async () => {
+      const ctx = createContext();
+
+      const handled = await processUserPrompt(ctx, "Review README", createDeps());
+
+      expect(handled).toBe(false);
+      expect(mocked.getMissingFolderNoticeMock).toHaveBeenCalledWith("D:\\Projects\\Repo");
+      expect(ctx.reply).toHaveBeenCalledWith("folder gone notice");
+      expect(mocked.safeBackgroundTaskMock).not.toHaveBeenCalled();
+      expect(mocked.attachToSessionMock).not.toHaveBeenCalled();
+    });
+
+    it("creates no session when none is selected", async () => {
+      mocked.currentSession = null;
+      const ctx = createContext();
+
+      await processUserPrompt(ctx, "Review README", createDeps());
+
+      expect(mocked.sessionCreateMock).not.toHaveBeenCalled();
+      expect(ctx.reply).not.toHaveBeenCalledWith(t("bot.creating_session"));
+    });
+
+    it("drops a pending /ls attachment as a failed send does", async () => {
+      promptAttachment.set("D:\\Projects\\Repo\\src\\index.ts", "D:\\Projects\\Repo");
+      promptAttachment.setConfirmationMessageId(555);
+
+      await processUserPrompt(createContext(), "Explain this file", createDeps());
+
+      expect(promptAttachment.get()).toBeNull();
+      expect(mocked.interactionClearMock).toHaveBeenCalledWith("attachment_consumed");
+      expect(mocked.editMessageReplyMarkupMock).toHaveBeenCalledWith(777, 555);
+      expect(mocked.resolvePendingAttachmentMock).not.toHaveBeenCalled();
+    });
+
+    it("leaves a prompt started from the skills catalog to the send itself", async () => {
+      await processIncomingPrompt(createContext(), createIncomingPrompt("/review"), createDeps(), {
+        skipProjectFolderCheck: true,
+      });
+
+      expect(mocked.getMissingFolderNoticeMock).not.toHaveBeenCalled();
+      expect(mocked.safeBackgroundTaskMock).toHaveBeenCalled();
+    });
+
+    it("keeps a prompt for a busy session out of its inbox", async () => {
+      const ctx = createContext();
+
+      const admitted = await admitPromptToInbox(
+        ctx,
+        createIncomingPrompt("Also check tests"),
+        createDeps(),
+        "queue",
+      );
+
+      expect(admitted).toBeNull();
+      expect(ctx.reply).toHaveBeenCalledWith("folder gone notice");
+      expect(mocked.sessionPromptAsyncMock).not.toHaveBeenCalled();
+    });
+  });
+
+  it("registers suppression entry for text prompts", async () => {
+    const handled = await processUserPrompt(createContext(), "Review README", createDeps());
+
+    expect(handled).toBe(true);
+    expect(mocked.attachToSessionMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        bot: expect.any(Object),
+        chatId: 777,
+        session: {
+          id: "session-1",
+          title: "Session",
+          directory: "D:\\Projects\\Repo",
+        },
+        ensureEventSubscription: expect.any(Function),
+      }),
+    );
+    expect(mocked.suppressionRegisterMock).toHaveBeenCalledWith("session-1", "Review README");
+  });
+
+  it("names a session it had to create as a new session while OpenCode has not named it", async () => {
+    mocked.currentSession = null;
+    mocked.sessionCreateMock.mockResolvedValueOnce({
+      data: { id: "session-2", title: "" },
+      error: null,
+    });
+    const ctx = createContext();
+    const baseDeps = createDeps();
+    const deps: ProcessPromptDeps = {
+      ...baseDeps,
+      keyboardManager: {
+        ...baseDeps.keyboardManager,
+        getContextInfo: vi.fn(() => null),
+      } as unknown as AppContainer["keyboardManager"],
+    };
+
+    await processUserPrompt(ctx, "Review README", deps);
+
+    expect(mocked.attachToSessionMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        session: { id: "session-2", title: "", directory: "D:\\Projects\\Repo" },
+      }),
+    );
+    expect(ctx.reply).toHaveBeenCalledWith(
+      t("bot.session_created", { title: t("pinned.default_session_title") }),
+      expect.anything(),
+    );
+  });
+
+  it("starts prompts through promptAsync instead of the streaming prompt endpoint", async () => {
+    const handled = await processUserPrompt(createContext(), "Review README", createDeps());
+
+    expect(handled).toBe(true);
+
+    const backgroundTask = getScheduledBackgroundTask();
+    await backgroundTask.task();
+
+    expect(mocked.sessionPromptAsyncMock).toHaveBeenCalledWith({
+      sessionID: "session-1",
+      directory: "D:\\Projects\\Repo",
+      parts: [{ type: "text", text: "Review README" }],
+      agent: "build",
+      model: {
+        providerID: "openai",
+        modelID: "gpt-5",
+      },
+      variant: "default",
+    });
+    expect(mocked.sessionPromptMock).not.toHaveBeenCalled();
+  });
+
+  it("still notifies the user when promptAsync reports a real start error", async () => {
+    const ctx = createContext();
+    const deps = createDeps();
+
+    const handled = await processUserPrompt(ctx, "Review README", deps);
+
+    expect(handled).toBe(true);
+
+    const backgroundTask = getScheduledBackgroundTask();
+    backgroundTask.onSuccess?.({ error: new Error("request start failed") });
+
+    expect(deps.bot.api.sendMessage).toHaveBeenCalledWith(
+      777,
+      "Failed to send request to OpenCode.",
+    );
+  });
+
+  it("still notifies the user when promptAsync rejects before the run starts", async () => {
+    const ctx = createContext();
+    const deps = createDeps();
+
+    const handled = await processUserPrompt(ctx, "Review README", deps);
+
+    expect(handled).toBe(true);
+
+    const backgroundTask = getScheduledBackgroundTask();
+    const startError = new Error("network down");
+    mocked.sessionPromptAsyncMock.mockRejectedValueOnce(startError);
+
+    await backgroundTask.task().catch((error) => {
+      backgroundTask.onError?.(error);
+    });
+
+    expect(deps.bot.api.sendMessage).toHaveBeenCalledWith(
+      777,
+      "Failed to send request to OpenCode.",
+    );
+  });
+
+  it("does not notify the user when promptAsync reports an error after detach", async () => {
+    const ctx = createContext();
+    const deps = createDeps();
+    const errorSpy = vi.spyOn(logger, "error").mockImplementation(() => {});
+
+    const handled = await processUserPrompt(ctx, "Review README", deps);
+
+    expect(handled).toBe(true);
+
+    container.attachManager.clear("test_detach");
+
+    const backgroundTask = getScheduledBackgroundTask();
+    backgroundTask.onSuccess?.({ error: new Error("request start failed") });
+
+    expect(deps.bot.api.sendMessage).not.toHaveBeenCalled();
+    expect(errorSpy).toHaveBeenCalled();
+    errorSpy.mockRestore();
+  });
+
+  it("does not notify the user when promptAsync rejects after detach", async () => {
+    const ctx = createContext();
+    const deps = createDeps();
+    const errorSpy = vi.spyOn(logger, "error").mockImplementation(() => {});
+
+    const handled = await processUserPrompt(ctx, "Review README", deps);
+
+    expect(handled).toBe(true);
+
+    container.attachManager.clear("test_detach");
+
+    const backgroundTask = getScheduledBackgroundTask();
+    const startError = new Error("network down");
+    mocked.sessionPromptAsyncMock.mockRejectedValueOnce(startError);
+
+    await backgroundTask.task().catch((error) => {
+      backgroundTask.onError?.(error);
+    });
+
+    expect(deps.bot.api.sendMessage).not.toHaveBeenCalled();
+    expect(errorSpy).toHaveBeenCalled();
+    errorSpy.mockRestore();
+  });
+
+  it("does not notify the user when promptAsync fails while attached to another session", async () => {
+    const ctx = createContext();
+    const deps = createDeps();
+
+    const handled = await processUserPrompt(ctx, "Review README", deps);
+
+    expect(handled).toBe(true);
+
+    container.attachManager.attach("session-2", "D:\\Projects\\Repo");
+
+    const backgroundTask = getScheduledBackgroundTask();
+    backgroundTask.onSuccess?.({ error: new Error("request start failed") });
+
+    expect(deps.bot.api.sendMessage).not.toHaveBeenCalled();
+  });
+
+  it("still notifies the user when promptAsync fails after re-attach to the same session", async () => {
+    const ctx = createContext();
+    const deps = createDeps();
+
+    const handled = await processUserPrompt(ctx, "Review README", deps);
+
+    expect(handled).toBe(true);
+
+    container.attachManager.clear("test_detach");
+    container.attachManager.attach("session-1", "D:\\Projects\\Repo");
+
+    const backgroundTask = getScheduledBackgroundTask();
+    backgroundTask.onSuccess?.({ error: new Error("request start failed") });
+
+    expect(deps.bot.api.sendMessage).toHaveBeenCalledWith(
+      777,
+      "Failed to send request to OpenCode.",
+    );
+  });
+
+  it("does not register suppression entry for file-only prompts", async () => {
+    const handled = await processUserPrompt(createContext(), "", createDeps(), [
+      {
+        type: "file",
+        mime: "text/plain",
+        url: "data:text/plain;base64,SGVsbG8=",
+      } as never,
+    ]);
+
+    expect(handled).toBe(true);
+    expect(mocked.suppressionRegisterMock).not.toHaveBeenCalled();
+  });
+
+  it("keeps text prompts text-only when TTS mode is auto", async () => {
+    mocked.getTtsModeMock.mockReturnValue("auto");
+
+    const handled = await processUserPrompt(createContext(), "Review README", createDeps());
+
+    expect(handled).toBe(true);
+    expect(getPromptResponseMode("session-1")).toBe("text_only");
+  });
+
+  it("uses plural placeholder text for multiple file-only prompts", async () => {
+    const handled = await processUserPrompt(createContext(), "", createDeps(), [
+      {
+        type: "file",
+        mime: "image/png",
+        url: "data:image/png;base64,Zmlyc3Q=",
+      } as never,
+      {
+        type: "file",
+        mime: "image/png",
+        url: "data:image/png;base64,c2Vjb25k",
+      } as never,
+    ]);
+
+    expect(handled).toBe(true);
+
+    const backgroundTask = getScheduledBackgroundTask();
+    await backgroundTask.task();
+
+    expect(mocked.sessionPromptAsyncMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        parts: [
+          { type: "text", text: "See attached files" },
+          expect.objectContaining({ type: "file", mime: "image/png" }),
+          expect.objectContaining({ type: "file", mime: "image/png" }),
+        ],
+      }),
+    );
+  });
+
+  it("does not call OpenCode for an empty prompt without attachments", async () => {
+    const ctx = createContext();
+
+    const handled = await processIncomingPrompt(ctx, createIncomingPrompt(""), createDeps());
+
+    expect(handled).toBe(false);
+    expect(mocked.attachToSessionMock).not.toHaveBeenCalled();
+    expect(mocked.safeBackgroundTaskMock).not.toHaveBeenCalled();
+    expect(ctx.reply).not.toHaveBeenCalled();
+  });
+
+  it("downloads deferred rich photos after the prompt is accepted", async () => {
+    const ctx = createContext();
+    const downloadFile = vi.fn().mockResolvedValue({
+      buffer: Buffer.from("photo"),
+      filePath: "photos/rich.jpg",
+    });
+    const deps: ProcessPromptDeps = {
+      ...createDeps(),
+      downloadFile,
+      getModelCapabilities: vi.fn().mockResolvedValue({ input: { image: true } }),
+    };
+
+    const handled = await processIncomingPrompt(
+      ctx,
+      createIncomingPrompt("", {
+        photos: [{ fileId: "rich-photo", filename: "rich.jpg", source: "rich" }],
+      }),
+      deps,
+    );
+
+    expect(handled).toBe(true);
+    expect(ctx.reply).toHaveBeenCalledWith(t("bot.photo_downloading"));
+    expect(downloadFile).toHaveBeenCalledWith(ctx.api, "rich-photo");
+
+    const backgroundTask = getScheduledBackgroundTask();
+    await backgroundTask.task();
+    expect(mocked.sessionPromptAsyncMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        parts: [
+          { type: "text", text: "See attached file" },
+          expect.objectContaining({
+            type: "file",
+            mime: "image/jpeg",
+            filename: "rich.jpg",
+            url: expect.stringMatching(/^data:image\/jpeg;base64,/),
+          }),
+        ],
+      }),
+    );
+  });
+
+  it("keeps the standalone-photo caption fallback for models without images", async () => {
+    const ctx = createContext();
+    const downloadFile = vi.fn();
+    const deps: ProcessPromptDeps = {
+      ...createDeps(),
+      downloadFile,
+      getModelCapabilities: vi.fn().mockResolvedValue({ input: { image: false } }),
+    };
+
+    const handled = await processIncomingPrompt(
+      ctx,
+      createIncomingPrompt("Use this caption", {
+        photos: [{ fileId: "photo", filename: "photo.jpg", source: "standalone" }],
+      }),
+      deps,
+    );
+
+    expect(handled).toBe(true);
+    expect(ctx.reply).toHaveBeenCalledWith(t("bot.photo_model_no_image"));
+    expect(downloadFile).not.toHaveBeenCalled();
+
+    const backgroundTask = getScheduledBackgroundTask();
+    await backgroundTask.task();
+    expect(mocked.sessionPromptAsyncMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        parts: [{ type: "text", text: "Use this caption" }],
+      }),
+    );
+  });
+
+  it("rejects a rich photo envelope when the model does not support images", async () => {
+    const ctx = createContext();
+    const deps: ProcessPromptDeps = {
+      ...createDeps(),
+      downloadFile: vi.fn(),
+      getModelCapabilities: vi.fn().mockResolvedValue({ input: { image: false } }),
+    };
+
+    const handled = await processIncomingPrompt(
+      ctx,
+      createIncomingPrompt("Describe this", {
+        photos: [{ fileId: "photo", filename: "photo.jpg", source: "rich" }],
+      }),
+      deps,
+    );
+
+    expect(handled).toBe(false);
+    expect(ctx.reply).toHaveBeenCalledWith(t("bot.photo_model_no_image"));
+    expect(mocked.safeBackgroundTaskMock).not.toHaveBeenCalled();
+  });
+
+  it("aborts a rich envelope when one photo download fails", async () => {
+    const ctx = createContext();
+    const deps: ProcessPromptDeps = {
+      ...createDeps(),
+      downloadFile: vi.fn().mockRejectedValue(new Error("download failed")),
+      getModelCapabilities: vi.fn().mockResolvedValue({ input: { image: true } }),
+    };
+
+    const handled = await processIncomingPrompt(
+      ctx,
+      createIncomingPrompt("Describe this", {
+        photos: [{ fileId: "photo", filename: "photo.jpg", source: "rich" }],
+      }),
+      deps,
+    );
+
+    expect(handled).toBe(false);
+    expect(ctx.reply).toHaveBeenLastCalledWith(t("bot.photo_download_error"));
+    expect(mocked.safeBackgroundTaskMock).not.toHaveBeenCalled();
+  });
+
+  it("reads a photo's capabilities before checking whether the session is busy", async () => {
+    const getModelCapabilities = vi.fn().mockResolvedValue({ input: { image: true } });
+    const deps: ProcessPromptDeps = {
+      ...createDeps(),
+      downloadFile: vi.fn().mockResolvedValue({
+        buffer: Buffer.from("photo"),
+        filePath: "photos/photo.jpg",
+      }),
+      getModelCapabilities,
+    };
+
+    await processIncomingPrompt(
+      createContext(),
+      createIncomingPrompt("Describe this", {
+        photos: [{ fileId: "photo", filename: "photo.jpg", source: "rich" }],
+      }),
+      deps,
+    );
+
+    const firstCapabilitiesRead = defined(getModelCapabilities.mock.invocationCallOrder[0]);
+    const firstBusyCheck = defined(mocked.sessionStatusMock.mock.invocationCallOrder[0]);
+    expect(firstCapabilitiesRead).toBeLessThan(firstBusyCheck);
+  });
+
+  it("answers busy for a photo whose session started a run while its model was being read", async () => {
+    const ctx = createContext();
+    const downloadFile = vi.fn();
+    const deps: ProcessPromptDeps = {
+      ...createDeps(),
+      downloadFile,
+      getModelCapabilities: vi.fn().mockImplementation(async () => {
+        mocked.sessionStatusMock.mockResolvedValue({
+          data: { "session-1": { type: "busy" } },
+          error: null,
+        });
+        return { input: { image: true } };
+      }),
+    };
+
+    const handled = await processIncomingPrompt(
+      ctx,
+      createIncomingPrompt("Describe this", {
+        photos: [{ fileId: "photo", filename: "photo.jpg", source: "rich" }],
+      }),
+      deps,
+    );
+
+    expect(handled).toBe(false);
+    expect(ctx.reply).toHaveBeenCalledWith(t("bot.session_busy"));
+    expect(downloadFile).not.toHaveBeenCalled();
+  });
+
+  it("gates a photo sent into a running session's inbox by the model's capabilities", async () => {
+    const ctx = createContext();
+    const deps: ProcessPromptDeps = {
+      ...createDeps(),
+      downloadFile: vi.fn(),
+      getModelCapabilities: vi.fn().mockResolvedValue({ input: { image: false } }),
+    };
+
+    const admitted = await admitPromptToInbox(
+      ctx,
+      createIncomingPrompt("Describe this", {
+        photos: [{ fileId: "photo", filename: "photo.jpg", source: "rich" }],
+      }),
+      deps,
+      "steer",
+    );
+
+    expect(admitted).toBeNull();
+    expect(ctx.reply).toHaveBeenCalledWith(t("bot.photo_model_no_image"));
+    expect(deps.getModelCapabilities).toHaveBeenCalledTimes(1);
+  });
+
+  describe("pending /ls attachment", () => {
+    const attachmentPart = {
+      type: "file" as const,
+      mime: "text/plain",
+      filename: "src\\index.ts",
+      url: "file:///D:/Projects/Repo/src/index.ts",
+    };
+
+    function startWaitingMode(): void {
+      promptAttachment.set("D:\\Projects\\Repo\\src\\index.ts", "D:\\Projects\\Repo");
+      promptAttachment.setConfirmationMessageId(555);
+    }
+
+    it("sends the attached file alongside the prompt", async () => {
+      startWaitingMode();
+      mocked.resolvePendingAttachmentMock.mockResolvedValue(attachmentPart);
+
+      await processUserPrompt(createContext(), "Explain this file", createDeps());
+      await getScheduledBackgroundTask().task();
+
+      expect(mocked.resolvePendingAttachmentMock).toHaveBeenCalledWith("D:\\Projects\\Repo");
+      expect(mocked.sessionPromptAsyncMock).toHaveBeenCalledWith(
+        expect.objectContaining({
+          parts: [{ type: "text", text: "Explain this file" }, attachmentPart],
+        }),
+      );
+    });
+
+    it("consumes the attachment and leaves the waiting mode", async () => {
+      startWaitingMode();
+      mocked.resolvePendingAttachmentMock.mockResolvedValue(attachmentPart);
+
+      await processUserPrompt(createContext(), "Explain this file", createDeps());
+
+      expect(promptAttachment.get()).toBeNull();
+      expect(mocked.interactionClearMock).toHaveBeenCalledWith("attachment_consumed");
+    });
+
+    it("removes the cancel button from the confirmation once the file was sent", async () => {
+      startWaitingMode();
+      mocked.resolvePendingAttachmentMock.mockResolvedValue(attachmentPart);
+
+      await processUserPrompt(createContext(), "Explain this file", createDeps());
+
+      expect(mocked.editMessageReplyMarkupMock).toHaveBeenCalledWith(777, 555);
+    });
+
+    it("still retires the confirmation when the file went stale", async () => {
+      startWaitingMode();
+      mocked.resolvePendingAttachmentMock.mockResolvedValue(null);
+
+      await processUserPrompt(createContext(), "Explain this file", createDeps());
+
+      expect(mocked.editMessageReplyMarkupMock).toHaveBeenCalledWith(777, 555);
+    });
+
+    it("does not touch any message when no file is attached", async () => {
+      await processUserPrompt(createContext(), "Plain prompt", createDeps());
+
+      expect(mocked.editMessageReplyMarkupMock).not.toHaveBeenCalled();
+    });
+
+    it("does not reuse the attachment for the next prompt", async () => {
+      startWaitingMode();
+      mocked.resolvePendingAttachmentMock.mockResolvedValueOnce(attachmentPart);
+
+      await processUserPrompt(createContext(), "First", createDeps());
+      mocked.sessionPromptAsyncMock.mockClear();
+      mocked.safeBackgroundTaskMock.mockClear();
+
+      await processUserPrompt(createContext(), "Second", createDeps());
+      await getScheduledBackgroundTask().task();
+
+      expect(mocked.sessionPromptAsyncMock).toHaveBeenCalledWith(
+        expect.objectContaining({ parts: [{ type: "text", text: "Second" }] }),
+      );
+    });
+
+    it("warns and sends the prompt without the file when it went stale", async () => {
+      startWaitingMode();
+      mocked.resolvePendingAttachmentMock.mockResolvedValue(null);
+
+      const ctx = createContext();
+      const handled = await processUserPrompt(ctx, "Explain this file", createDeps());
+      await getScheduledBackgroundTask().task();
+
+      expect(handled).toBe(true);
+      expect(ctx.reply).toHaveBeenCalledWith(expect.stringContaining("⚠️"));
+      expect(mocked.sessionPromptAsyncMock).toHaveBeenCalledWith(
+        expect.objectContaining({ parts: [{ type: "text", text: "Explain this file" }] }),
+      );
+      expect(promptAttachment.get()).toBeNull();
+    });
+
+    it("leaves interaction state alone when no file is attached", async () => {
+      await processUserPrompt(createContext(), "Plain prompt", createDeps());
+
+      expect(mocked.resolvePendingAttachmentMock).toHaveBeenCalled();
+      expect(mocked.interactionClearMock).not.toHaveBeenCalledWith("attachment_consumed");
+    });
+  });
+});

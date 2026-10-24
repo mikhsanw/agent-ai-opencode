@@ -1,0 +1,95 @@
+import type { Context } from "grammy";
+import { t } from "../../i18n/index.js";
+import {
+  clearCommandsInteraction,
+  executeCommand,
+  parseCommandsMetadata,
+  type ExecuteCommandDeps,
+} from "../callbacks/command-catalog-callback-handler.js";
+import {
+  clearSkillsInteraction,
+  executeSkill,
+  parseSkillsMetadata,
+} from "../callbacks/skills-catalog-callback-handler.js";
+
+export async function handleCommandTextArguments(
+  ctx: Context,
+  deps: ExecuteCommandDeps,
+): Promise<boolean> {
+  const text = ctx.message?.text;
+  if (text === undefined || text.startsWith("/")) {
+    return false;
+  }
+
+  const metadata = parseCommandsMetadata(deps.interactionManager.getSnapshot());
+  if (!metadata || metadata.stage !== "confirm") {
+    return false;
+  }
+
+  const argumentsText = text.trim();
+  if (!argumentsText) {
+    await ctx.reply(t("commands.arguments_empty"));
+    return true;
+  }
+
+  clearCommandsInteraction(deps, "commands_arguments_submitted");
+
+  if (ctx.chat) {
+    await ctx.api.deleteMessage(ctx.chat.id, metadata.messageId).catch(() => {});
+  }
+
+  await executeCommand(ctx, deps, {
+    projectDirectory: metadata.projectDirectory,
+    commandName: metadata.commandName,
+    argumentsText,
+  });
+
+  return true;
+}
+
+export async function handleSkillTextArguments(
+  ctx: Context,
+  deps: ExecuteCommandDeps,
+): Promise<boolean> {
+  const text = ctx.message?.text;
+  if (text === undefined || text.startsWith("/")) {
+    return false;
+  }
+
+  const metadata = parseSkillsMetadata(deps.interactionManager.getSnapshot());
+  if (!metadata || metadata.stage !== "confirm") {
+    return false;
+  }
+
+  const argumentsText = text.trim();
+  if (!argumentsText) {
+    await ctx.reply(t("skills.arguments_empty"));
+    return true;
+  }
+
+  clearSkillsInteraction(deps, "skills_arguments_submitted");
+
+  if (ctx.chat) {
+    await ctx.api.deleteMessage(ctx.chat.id, metadata.messageId).catch(() => {});
+  }
+
+  await executeSkill(ctx, deps, {
+    projectDirectory: metadata.projectDirectory,
+    skillName: metadata.skillName,
+    argumentsText,
+  });
+
+  return true;
+}
+
+export async function handleCatalogTextArguments(
+  ctx: Context,
+  deps: ExecuteCommandDeps,
+): Promise<boolean> {
+  const handledCommandArgs = await handleCommandTextArguments(ctx, deps);
+  if (handledCommandArgs) {
+    return true;
+  }
+
+  return handleSkillTextArguments(ctx, deps);
+}

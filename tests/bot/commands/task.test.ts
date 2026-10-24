@@ -1,0 +1,383 @@
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import type { Context } from "grammy";
+import { handleTaskTextInput, taskCommand } from "../../../src/bot/commands/task-command.js";
+import { handleTaskCallback } from "../../../src/bot/callbacks/scheduled-task-callback-handler.js";
+import { t } from "../../../src/i18n/index.js";
+import { createTestAppContainer } from "../../helpers/app-container.js";
+import type { AppContainer } from "../../../src/app/bootstrap/app-container.js";
+
+const mocked = vi.hoisted(() => ({
+  currentProject: {
+    id: "project-1",
+    worktree: "D:\\Projects\\Repo",
+  } as { id: string; worktree: string } | null,
+  storedModel: {
+    providerID: "openai",
+    modelID: "gpt-5",
+    variant: "default",
+  },
+  storedAgent: "build",
+  taskLimit: 10,
+  parseTaskScheduleMock: vi.fn(),
+  addScheduledTaskMock: vi.fn(),
+  listScheduledTasksMock: vi.fn(),
+  registerTaskMock: vi.fn(),
+  getMissingFolderNoticeMock: vi.fn(),
+}));
+
+vi.mock("../../../src/app/services/missing-folder-notice-service.js", () => ({
+  getMissingFolderNotice: mocked.getMissingFolderNoticeMock,
+}));
+
+vi.mock("../../../src/config.js", () => ({
+  config: {
+    telegram: {
+      token: "test-token",
+      allowedUserId: 777,
+      proxyUrl: "",
+    },
+    opencode: {
+      apiUrl: "http://localhost:4096",
+      username: "opencode",
+      password: "",
+      model: {
+        provider: "openai",
+        modelId: "gpt-5",
+      },
+    },
+    server: {
+      logLevel: "info",
+    },
+    bot: {
+      get taskLimit() {
+        return mocked.taskLimit;
+      },
+      locale: "en",
+      sessionsListLimit: 10,
+      projectsListLimit: 10,
+      messageFormatMode: "markdown",
+    },
+    files: {
+      maxFileSizeKb: 100,
+    },
+    stt: {
+      apiUrl: "",
+      apiKey: "",
+      model: "whisper-large-v3-turbo",
+      language: "",
+    },
+  },
+}));
+
+vi.mock("../../../src/app/stores/settings-store.js", () => ({
+  getCurrentProject: vi.fn(() => mocked.currentProject),
+}));
+
+vi.mock("../../../src/app/services/model-selection-service.js", () => ({
+  getStoredModel: vi.fn(() => mocked.storedModel),
+}));
+
+vi.mock("../../../src/app/services/agent-selection-service.js", () => ({
+  getStoredAgent: vi.fn(() => mocked.storedAgent),
+}));
+
+vi.mock("../../../src/app/services/scheduled-task-schedule-parser-service.js", () => ({
+  parseTaskSchedule: mocked.parseTaskScheduleMock,
+}));
+
+vi.mock("../../../src/app/stores/scheduled-task-store.js", () => ({
+  addScheduledTask: mocked.addScheduledTaskMock,
+  listScheduledTasks: mocked.listScheduledTasksMock,
+}));
+
+function createCommandContext(): Context {
+  return {
+    chat: { id: 777 },
+    reply: vi.fn().mockResolvedValue({ message_id: 100 }),
+  } as unknown as Context;
+}
+
+function createTextContext(text: string, messageIds: number[]): Context {
+  const reply = vi.fn();
+  for (const messageId of messageIds) {
+    reply.mockResolvedValueOnce({ message_id: messageId });
+  }
+
+  return {
+    chat: { id: 777 },
+    message: { text } as Context["message"],
+    reply,
+    api: {
+      deleteMessage: vi.fn().mockResolvedValue(true),
+    },
+  } as unknown as Context;
+}
+
+function createCallbackContext(data: string, messageId: number): Context {
+  return {
+    chat: { id: 777 },
+    callbackQuery: {
+      data,
+      message: { message_id: messageId },
+    } as Context["callbackQuery"],
+    answerCallbackQuery: vi.fn().mockResolvedValue(undefined),
+    deleteMessage: vi.fn().mockResolvedValue(undefined),
+    reply: vi.fn().mockResolvedValue({ message_id: 500 }),
+    api: {
+      deleteMessage: vi.fn().mockResolvedValue(true),
+    },
+  } as unknown as Context;
+}
+
+function createDeps() {
+  return {
+    ...container,
+    scheduledTaskRuntime: { registerTask: mocked.registerTaskMock } as never,
+  };
+}
+
+let container: AppContainer;
+
+beforeEach(() => {
+  container = createTestAppContainer();
+});
+
+describe("bot/commands/task", () => {
+  beforeEach(() => {
+    container.interactionManager.clear("test_setup");
+    container.taskCreationManager.clear();
+
+    mocked.currentProject = {
+      id: "project-1",
+      worktree: "D:\\Projects\\Repo",
+    };
+    mocked.storedModel = {
+      providerID: "openai",
+      modelID: "gpt-5",
+      variant: "default",
+    };
+    mocked.storedAgent = "build";
+    mocked.parseTaskScheduleMock.mockReset();
+    mocked.addScheduledTaskMock.mockReset();
+    mocked.listScheduledTasksMock.mockReset();
+    mocked.registerTaskMock.mockReset();
+    mocked.getMissingFolderNoticeMock.mockReset().mockResolvedValue(null);
+    mocked.taskLimit = 10;
+    mocked.addScheduledTaskMock.mockResolvedValue(undefined);
+    mocked.listScheduledTasksMock.mockReturnValue([]);
+    mocked.parseTaskScheduleMock.mockResolvedValue({
+      kind: "cron",
+      cron: "0 17 * * *",
+      timezone: "UTC",
+      summary: "Every day at 17:00",
+      nextRunAt: "2026-03-16T17:00:00.000Z",
+    });
+  });
+
+  it("starts scheduled task creation flow", async () => {
+    const ctx = createCommandContext();
+
+    await taskCommand(ctx as never, createDeps());
+
+    expect(ctx.reply).toHaveBeenCalledWith(t("task.prompt.schedule"), {
+      reply_markup: expect.any(Object),
+    });
+    expect(container.taskCreationManager.isWaitingForSchedule()).toBe(true);
+    expect(container.interactionManager.getSnapshot()).toMatchObject({
+      kind: "task",
+      expectedInput: "text",
+      metadata: {
+        flow: "task",
+        stage: "awaiting_schedule",
+        projectId: "project-1",
+        projectWorktree: "D:\\Projects\\Repo",
+      },
+    });
+  });
+
+  it("answers with the folder notice and starts nothing when the project folder is gone", async () => {
+    mocked.getMissingFolderNoticeMock.mockResolvedValue("folder gone notice");
+    const ctx = createCommandContext();
+
+    await taskCommand(ctx as never, createDeps());
+
+    expect(mocked.getMissingFolderNoticeMock).toHaveBeenCalledWith("D:\\Projects\\Repo");
+    expect(ctx.reply).toHaveBeenCalledWith("folder gone notice");
+    expect(container.taskCreationManager.isActive()).toBe(false);
+    expect(container.interactionManager.getSnapshot()).toBeNull();
+  });
+
+  it("does not start flow when task limit is reached", async () => {
+    mocked.taskLimit = 1;
+    mocked.listScheduledTasksMock.mockReturnValue([{ id: "task-1" }]);
+
+    const ctx = createCommandContext();
+
+    await taskCommand(ctx as never, createDeps());
+
+    expect(ctx.reply).toHaveBeenCalledWith(t("task.limit_reached", { limit: "1" }));
+    expect(container.taskCreationManager.isActive()).toBe(false);
+    expect(container.interactionManager.getSnapshot()).toBeNull();
+  });
+
+  it("parses schedule and switches flow to prompt input", async () => {
+    await taskCommand(createCommandContext() as never, createDeps());
+
+    const ctx = createTextContext("every day at 17:00", [201, 202]);
+    const handled = await handleTaskTextInput(ctx, createDeps());
+
+    expect(handled).toBe(true);
+    expect(mocked.parseTaskScheduleMock).toHaveBeenCalledWith(
+      "every day at 17:00",
+      "D:\\Projects\\Repo",
+      { providerID: "openai", modelID: "gpt-5", variant: "default" },
+    );
+    expect(ctx.reply).toHaveBeenNthCalledWith(1, t("task.parse.in_progress"));
+    const previewCall = (ctx.reply as ReturnType<typeof vi.fn>).mock.calls[1] as [
+      string,
+      { reply_markup: unknown },
+    ];
+    expect(previewCall[0]).toContain("Every day at 17:00");
+    expect(previewCall[0]).toContain("Cron: 0 17 * * *");
+    expect(previewCall[0]).toContain("UTC");
+    expect(previewCall[0]).toContain(t("task.kind.cron"));
+    expect(previewCall[0]).toContain(t("task.prompt.body"));
+    expect(previewCall[1]).toEqual(expect.objectContaining({ reply_markup: expect.any(Object) }));
+    expect(container.taskCreationManager.isWaitingForPrompt()).toBe(true);
+    expect(container.interactionManager.getSnapshot()).toMatchObject({
+      kind: "task",
+      expectedInput: "mixed",
+      metadata: {
+        flow: "task",
+        stage: "awaiting_prompt",
+        previewMessageId: 202,
+      },
+    });
+  });
+
+  it("saves scheduled task after receiving prompt text", async () => {
+    await taskCommand(createCommandContext() as never, createDeps());
+    await handleTaskTextInput(createTextContext("every day at 17:00", [201, 202]), createDeps());
+
+    const ctx = createTextContext("Send me a daily summary", [301]);
+    const handled = await handleTaskTextInput(ctx, createDeps());
+
+    expect(handled).toBe(true);
+    expect(mocked.addScheduledTaskMock).toHaveBeenCalledTimes(1);
+    expect(mocked.registerTaskMock).toHaveBeenCalledTimes(1);
+    expect(mocked.addScheduledTaskMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        projectId: "project-1",
+        projectWorktree: "D:\\Projects\\Repo",
+        agent: "build",
+        model: {
+          providerID: "openai",
+          modelID: "gpt-5",
+          variant: "default",
+        },
+        kind: "cron",
+        scheduleText: "every day at 17:00",
+        scheduleSummary: "Every day at 17:00",
+        prompt: "Send me a daily summary",
+        timezone: "UTC",
+        nextRunAt: "2026-03-16T17:00:00.000Z",
+        runCount: 0,
+        lastStatus: "idle",
+        lastError: null,
+      }),
+    );
+    const successCall = (ctx.reply as ReturnType<typeof vi.fn>).mock.calls[0] as [string];
+    expect(successCall[0]).toContain("Send me a daily summary");
+    expect(successCall[0]).toContain("D:\\Projects\\Repo");
+    expect(successCall[0]).toContain("🛠️ Build");
+    expect(successCall[0].indexOf("🛠️ Build")).toBeLessThan(
+      successCall[0].indexOf("openai/gpt-5 (default)"),
+    );
+    expect(successCall[0]).toContain("openai/gpt-5 (default)");
+    expect(successCall[0]).toContain("Every day at 17:00");
+    expect(successCall[0]).toContain("Cron: 0 17 * * *");
+    expect(container.taskCreationManager.isActive()).toBe(false);
+    expect(container.interactionManager.getSnapshot()).toBeNull();
+  });
+
+  it("stops task save when limit is reached before final step", async () => {
+    await taskCommand(createCommandContext() as never, createDeps());
+    await handleTaskTextInput(createTextContext("every day at 17:00", [201, 202]), createDeps());
+
+    mocked.taskLimit = 1;
+    mocked.listScheduledTasksMock.mockReturnValue([{ id: "task-1" }]);
+
+    const ctx = createTextContext("Send me a daily summary", [301]);
+    const handled = await handleTaskTextInput(ctx, createDeps());
+
+    expect(handled).toBe(true);
+    expect(mocked.addScheduledTaskMock).not.toHaveBeenCalled();
+    expect(mocked.registerTaskMock).not.toHaveBeenCalled();
+    expect(ctx.reply).toHaveBeenCalledWith(t("task.limit_reached", { limit: "1" }));
+    expect(container.taskCreationManager.isActive()).toBe(false);
+    expect(container.interactionManager.getSnapshot()).toBeNull();
+  });
+
+  it("restarts schedule step when retry button is pressed", async () => {
+    await taskCommand(createCommandContext() as never, createDeps());
+    await handleTaskTextInput(createTextContext("every day at 17:00", [201, 202]), createDeps());
+
+    const ctx = createCallbackContext("task:retry-schedule", 202);
+    const handled = await handleTaskCallback(ctx, createDeps());
+
+    expect(handled).toBe(true);
+    expect(ctx.answerCallbackQuery).toHaveBeenCalledWith({
+      text: t("task.retry_schedule_callback"),
+    });
+    expect(ctx.reply).toHaveBeenCalledWith(t("task.prompt.schedule"), {
+      reply_markup: expect.any(Object),
+    });
+    expect(container.taskCreationManager.isWaitingForSchedule()).toBe(true);
+    expect(container.interactionManager.getSnapshot()).toMatchObject({
+      kind: "task",
+      expectedInput: "text",
+      metadata: {
+        stage: "awaiting_schedule",
+      },
+    });
+  });
+
+  it("cancels task flow from schedule message", async () => {
+    await taskCommand(createCommandContext() as never, createDeps());
+
+    const ctx = createCallbackContext("task:cancel", 100);
+    const handled = await handleTaskCallback(ctx, createDeps());
+
+    expect(handled).toBe(true);
+    expect(ctx.answerCallbackQuery).toHaveBeenCalledWith({
+      text: t("common.cancelled"),
+    });
+    expect(ctx.reply).not.toHaveBeenCalled();
+    expect(container.taskCreationManager.isActive()).toBe(false);
+    expect(container.interactionManager.getSnapshot()).toBeNull();
+  });
+
+  it("rejects schedules more frequent than every 5 minutes", async () => {
+    await taskCommand(createCommandContext() as never, createDeps());
+    mocked.parseTaskScheduleMock.mockResolvedValue({
+      kind: "cron",
+      cron: "*/2 * * * *",
+      timezone: "UTC",
+      summary: "Every 2 minutes",
+      nextRunAt: "2026-03-16T17:00:00.000Z",
+    });
+
+    const ctx = createTextContext("every 2 minutes", [201, 202]);
+    const handled = await handleTaskTextInput(ctx, createDeps());
+
+    expect(handled).toBe(true);
+    expect(mocked.addScheduledTaskMock).not.toHaveBeenCalled();
+    const errorCall = (ctx.reply as ReturnType<typeof vi.fn>).mock.calls[1] as [
+      string,
+      { reply_markup: unknown },
+    ];
+    expect(errorCall[0]).toContain(t("task.schedule_too_frequent"));
+    expect(errorCall[1]).toEqual(expect.objectContaining({ reply_markup: expect.any(Object) }));
+    expect(container.taskCreationManager.isWaitingForSchedule()).toBe(true);
+  });
+});
