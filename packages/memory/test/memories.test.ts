@@ -105,6 +105,17 @@ describe("replace, remove, undo, search", () => {
     expect(store.undo()).toEqual({ status: "nothing" });
   });
 
+  it("historySince mengembalikan perubahan sejak waktu tertentu, urut lama ke baru", () => {
+    store.write({ text: "Pengguna memakai Vim.", actor: "tool" });
+    const mark = clock;
+    store.write({ text: "Server produksi berjalan di Ubuntu 24.04.", actor: "capture" });
+    store.remove(1, "telegram");
+    expect(store.historySince(mark).map((e) => [e.action, e.memoryId, e.actor])).toEqual([
+      ["insert", 2, "capture"],
+      ["delete", 1, "telegram"],
+    ]);
+  });
+
   it("pencarian FTS5 trigram menemukan potongan kata dan mengabaikan entri terhapus", () => {
     store.write({ text: "Server produksi pengguna memakai Ubuntu 24.04.", actor: "tool" });
     store.write({ text: "Stack utama pengguna Laravel 11 dan Flutter.", actor: "tool" });

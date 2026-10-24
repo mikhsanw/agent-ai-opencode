@@ -1,0 +1,18 @@
+{
+  "name": "agent-ai-opencode",
+  "private": true,
+  "description": "Agen OpenCode V2 lewat Telegram dengan memori jangka panjang dan skill hasil belajar",
+  "license": "MIT",
+  "engines": {
+    "node": ">=22.14.0"
+  },
+  "workspaces": [
+    "packages/memory",
+    "bot"
+  ],
+  "scripts": {
+    "build": "npm run build -w @aao/memory && npm run build -w @grinev/opencode-telegram-bot",
+    "test": "npm test -w @aao/memory && npm test -w @grinev/opencode-telegram-bot",
+    "typecheck": "npm run typecheck -w @aao/memory && npm run typecheck -w @grinev/opencode-telegram-bot"
+  }
+}
