@@ -1,69 +1,134 @@
 import { describe, expect, it, vi } from "vitest";
-import { createReadinessGate, type ReadinessDeps } from "../../src/aao/readiness.js";
+import { createReadinessGate, readLoadedDirectories, type ReadinessDeps } from "../../src/aao/readiness.js";
 
-function setup(options: { loaded: string[]; listed?: boolean; directory?: string | null; wrapped?: boolean }) {
+const DIR = "/srv/workspace/app";
+const STARTED = 1_000_000;
+
+/** Fake OpenCode + MCP event timeline. */
+function setup(options: {
+  loaded: string[];
+  baseline?: string[];
+  toolsList?: number[];
+  initialize?: number[];
+  pid?: number;
+  now?: number;
+  listOnWait?: boolean;
+  directory?: string | null;
+}) {
   const calls: string[] = [];
-  let count = 3;
+  const state = {
+    now: options.now ?? STARTED + 60_000,
+    pid: options.pid ?? 100,
+    loaded: [...options.loaded],
+    toolsList: [...(options.toolsList ?? [])],
+    initialize: [...(options.initialize ?? [])],
+  };
   const deps: ReadinessDeps = {
     getJson: vi.fn(async (path: string, query?: Record<string, string>) => {
       calls.push(query ? `${path}?directory=${query.directory}` : path);
+      if (path === "/api/info") return { data: { pid: state.pid } };
       if (path.startsWith("/api/session/")) {
-        return options.directory === null ? { data: {} } : { data: { location: { directory: options.directory ?? "/srv/workspace/app" } } };
+        return options.directory === null ? { data: {} } : { data: { location: { directory: options.directory ?? DIR } } };
       }
-      if (path === "/api/debug/location") {
-        const list = options.loaded.map((directory) => ({ directory }));
-        return options.wrapped ? { data: list } : list;
-      }
-      count++;
+      if (path === "/api/debug/location") return state.loaded.map((directory) => ({ directory }));
       return { data: [] };
     }),
-    getToolsListCount: () => count,
-    waitForToolsList: vi.fn(async (after: number) => {
-      calls.push(`wait>${after}`);
-      return options.listed ?? true;
+    toolsListSince: (since) => state.toolsList.filter((at) => at >= since).length,
+    lastToolsListAt: () => state.toolsList.at(-1) ?? 0,
+    firstInitializeAfter: (after) => state.initialize.find((at) => at > after) ?? null,
+    waitForToolsListSince: vi.fn(async (since: number, count: number) => {
+      calls.push(`wait since=${since - STARTED} count=${count}`);
+      if (options.listOnWait === false) return false;
+      state.toolsList.push(state.now); // the catalog arrives "now"
+      return true;
     }),
+    baseline: new Set(options.baseline ?? []),
+    startedAt: STARTED,
     sleep: vi.fn(async (ms: number) => void calls.push(`sleep:${ms}`)),
+    now: () => state.now,
     timeoutMs: 10_000,
     marginMs: 1000,
   };
-  return { gate: createReadinessGate(deps), calls, deps };
+  const relevant = () => calls.filter((c) => c !== "/api/info");
+  return { gate: createReadinessGate(deps), calls, relevant, state };
 }
 
 describe("aao/readiness", () => {
-  it("does not wait when the location is already loaded", async () => {
-    const { gate, calls } = setup({ loaded: ["/srv/workspace/app"] });
+  it("does not wait for a location loaded before the runtime started", async () => {
+    const { gate, relevant } = setup({ loaded: [DIR], baseline: [DIR] });
     await gate("ses_1");
-    expect(calls).toEqual(["/api/session/ses_1", "/api/debug/location"]);
+    expect(relevant()).toEqual(["/api/session/ses_1", "/api/debug/location"]);
   });
 
-  it("loads a cold location, waits for tools/list, then applies the margin", async () => {
-    const { gate, calls } = setup({ loaded: ["/srv/workspace/other"], wrapped: true });
+  it("does not wait when every fresh location listed its tools long ago", async () => {
+    const { gate, relevant } = setup({ loaded: [DIR], toolsList: [STARTED + 1000] });
     await gate("ses_1");
-    expect(calls).toEqual([
+    expect(relevant()).toEqual(["/api/session/ses_1", "/api/debug/location"]);
+  });
+
+  it("race: location just loaded by session creation, its tools/list not seen yet", async () => {
+    const { gate, relevant } = setup({ loaded: ["/srv/old", DIR], baseline: ["/srv/old"] });
+    await gate("ses_1");
+    expect(relevant()).toEqual(["/api/session/ses_1", "/api/debug/location", "wait since=0 count=1", "sleep:1000"]);
+  });
+
+  it("project switch: a second fresh location needs its own tools/list", async () => {
+    const { gate, relevant } = setup({ loaded: ["/srv/a", DIR], toolsList: [STARTED + 1000] });
+    await gate("ses_1");
+    expect(relevant()).toContain("wait since=0 count=2");
+  });
+
+  it("cold location: loads it, then waits for its tools/list and the margin", async () => {
+    const { gate, relevant } = setup({ loaded: [] });
+    await gate("ses_1");
+    expect(relevant()).toEqual([
       "/api/session/ses_1",
       "/api/debug/location",
-      "/api/mcp?directory=/srv/workspace/app",
-      "wait>3",
+      `/api/mcp?directory=${DIR}`,
+      "wait since=0 count=1",
       "sleep:1000",
     ]);
   });
 
-  it("gives up after the timeout without the margin (prompt still goes out)", async () => {
-    const { gate, calls } = setup({ loaded: [], listed: false });
+  it("waits out the rest of the margin after a recent tools/list", async () => {
+    const now = STARTED + 60_000;
+    const { gate, relevant } = setup({ loaded: [DIR], toolsList: [now - 300], now });
     await gate("ses_1");
-    expect(calls.at(-1)).toBe("wait>3");
+    expect(relevant().at(-1)).toBe("sleep:700");
   });
 
-  it("caches the session directory", async () => {
-    const { gate, calls } = setup({ loaded: ["/srv/workspace/app"] });
+  it("OpenCode restart (new pid): old tools/list calls no longer count", async () => {
+    const { gate, relevant, state } = setup({ loaded: [DIR], toolsList: [STARTED + 1000] });
+    await gate("ses_1"); // first call learns pid 100, nothing to wait for
+    expect(relevant()).not.toContain("wait since=0 count=1");
+
+    state.pid = 200; // restarted; the new process initialized at +70s, catalog not listed yet
+    state.initialize.push(STARTED + 70_000);
+    state.now = STARTED + 70_100;
     await gate("ses_1");
-    await gate("ses_1");
-    expect(calls.filter((c) => c.startsWith("/api/session/"))).toHaveLength(1);
+    expect(relevant()).toContain("wait since=70000 count=1");
   });
 
-  it("returns quietly when the session has no directory", async () => {
-    const { gate, calls } = setup({ loaded: [], directory: null });
+  it("gives up after the timeout (prompt still goes out)", async () => {
+    const { gate, relevant } = setup({ loaded: [], listOnWait: false });
     await gate("ses_1");
-    expect(calls).toEqual(["/api/session/ses_1"]);
+    expect(relevant().at(-1)).toBe("wait since=0 count=1");
+  });
+
+  it("caches the session directory and returns quietly without one", async () => {
+    const cached = setup({ loaded: [DIR], baseline: [DIR] });
+    await cached.gate("ses_1");
+    await cached.gate("ses_1");
+    expect(cached.relevant().filter((c) => c.startsWith("/api/session/"))).toHaveLength(1);
+
+    const none = setup({ loaded: [], directory: null });
+    await none.gate("ses_1");
+    expect(none.relevant()).toEqual(["/api/session/ses_1"]);
+  });
+
+  it("reads both plain and wrapped location lists", () => {
+    expect(readLoadedDirectories([{ directory: "/a" }, {}])).toEqual(["/a"]);
+    expect(readLoadedDirectories({ data: [{ directory: "/b" }] })).toEqual(["/b"]);
+    expect(readLoadedDirectories(null)).toEqual([]);
   });
 });

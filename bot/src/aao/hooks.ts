@@ -43,6 +43,15 @@ export async function runAaoPromptGate(sessionId: string): Promise<void> {
   }
 }
 
+/**
+ * Memory and skill buttons do not touch the running task, so they may pass the busy gate.
+ * Skill proposals arrive while the agent is still working; blocking the button would make
+ * approval impossible until the run ends.
+ */
+export function isAaoCallbackData(data: string | undefined): boolean {
+  return typeof data === "string" && data.startsWith("aao:");
+}
+
 type GatedMethod = "prompt" | "promptAsync" | "command";
 const GATED_METHODS: readonly GatedMethod[] = ["prompt", "promptAsync", "command"];
 

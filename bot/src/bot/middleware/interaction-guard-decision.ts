@@ -11,6 +11,7 @@ import type {
 import { QUEUED_PROMPT_BUTTON_TEXT_PATTERN } from "../message-patterns.js";
 import type { LocalCommandRegistry } from "../../app/services/local-command-registry.js";
 import { isKnownCommand } from "../routers/command-utils.js";
+import { isAaoCallbackData } from "../../aao/hooks.js";
 
 export type InteractionGuardDecisionDeps = Pick<
   AppContainer,
@@ -213,6 +214,10 @@ export function resolveInteractionGuardDecision(
     }
 
     if (inputType === "text" && isQueuedPromptButtonPress(ctx)) {
+      return createAllowDecision(inputType, state, command, true);
+    }
+
+    if (inputType === "callback" && !state && isAaoCallbackData(ctx.callbackQuery?.data)) {
       return createAllowDecision(inputType, state, command, true);
     }
 

@@ -17,9 +17,15 @@ import { createCaptureScheduler, type CaptureStats } from "./capture.js";
 import { loadAaoConfig, type AaoConfig } from "./config.js";
 import { setAaoIdleListener, setAaoPromptGate } from "./hooks.js";
 import { getOpencodeJson } from "./opencode-http.js";
-import { createReadinessGate } from "./readiness.js";
+import { createReadinessGate, readLoadedDirectories } from "./readiness.js";
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+const MAX_TRACKED_EVENTS = 500;
+
+function pushBounded(list: number[], value: number): void {
+  list.push(value);
+  if (list.length > MAX_TRACKED_EVENTS) list.splice(0, list.length - MAX_TRACKED_EVENTS);
+}
 
 /**
  * Memory runtime living inside the bot process (OS user of the bot, never the agent):
@@ -30,7 +36,12 @@ export class AaoRuntime {
   readonly service: MemoryService;
   private server: http.Server | null = null;
   private toolsListCount = 0;
+  private lastToolsListAt = 0;
+  /** Recent MCP request timestamps, used by the readiness gate (bounded). */
+  private readonly toolsListTimes: number[] = [];
+  private readonly initializeTimes: number[] = [];
   private readonly toolsListWaiters = new Set<() => void>();
+  startedAt = 0;
   private knownPending: Set<string>;
   private skillProposedListener: ((skill: Skill) => void) | null = null;
   private captureStatsSource: (() => CaptureStats) | null = null;
@@ -47,9 +58,15 @@ export class AaoRuntime {
     const handler = createMcpHttpHandler(this.service, {
       token,
       onRequest: (methods) => {
+        const now = Date.now();
+        if (methods.includes("initialize")) {
+          pushBounded(this.initializeTimes, now);
+        }
         if (methods.includes("tools/list")) {
           this.toolsListCount++;
-          for (const wake of this.toolsListWaiters) wake();
+          this.lastToolsListAt = now;
+          pushBounded(this.toolsListTimes, now);
+          for (const wake of [...this.toolsListWaiters]) wake();
         }
       },
     });
@@ -64,6 +81,7 @@ export class AaoRuntime {
       this.server!.once("error", reject);
       this.server!.listen(this.config.mcpPort, this.config.mcpHost, () => resolve());
     });
+    this.startedAt = Date.now();
     const address = this.server.address();
     const port = typeof address === "object" && address ? address.port : this.config.mcpPort;
     this.url = `http://${this.config.mcpHost}:${port}/mcp`;
@@ -75,11 +93,31 @@ export class AaoRuntime {
     return this.toolsListCount;
   }
 
+  getLastToolsListAt(): number {
+    return this.lastToolsListAt;
+  }
+
+  toolsListSince(sinceMs: number): number {
+    return this.toolsListTimes.filter((at) => at >= sinceMs).length;
+  }
+
+  firstInitializeAfter(afterMs: number): number | null {
+    return this.initializeTimes.find((at) => at > afterMs) ?? null;
+  }
+
   waitForToolsList(after: number, timeoutMs: number): Promise<boolean> {
-    if (this.toolsListCount > after) return Promise.resolve(true);
+    return this.waitUntil(() => this.toolsListCount > after, timeoutMs);
+  }
+
+  waitForToolsListSince(sinceMs: number, count: number, timeoutMs: number): Promise<boolean> {
+    return this.waitUntil(() => this.toolsListSince(sinceMs) >= count, timeoutMs);
+  }
+
+  private waitUntil(condition: () => boolean, timeoutMs: number): Promise<boolean> {
+    if (condition()) return Promise.resolve(true);
     return new Promise((resolve) => {
       const wake = () => {
-        if (this.toolsListCount > after) finish(true);
+        if (condition()) finish(true);
       };
       const timer = setTimeout(() => finish(false), timeoutMs);
       const finish = (value: boolean) => {
@@ -179,12 +217,21 @@ export async function startAao(env: NodeJS.ProcessEnv = process.env): Promise<Aa
   }
 
   const active = runtime;
+  // Locations OpenCode already loaded before this runtime existed listed their tools earlier.
+  const baseline = new Set(
+    readLoadedDirectories(await getOpencodeJson("/api/debug/location").catch(() => [])),
+  );
   setAaoPromptGate(
     createReadinessGate({
       getJson: getOpencodeJson,
-      getToolsListCount: () => active.getToolsListCount(),
-      waitForToolsList: (after, timeoutMs) => active.waitForToolsList(after, timeoutMs),
+      toolsListSince: (since) => active.toolsListSince(since),
+      lastToolsListAt: () => active.getLastToolsListAt(),
+      firstInitializeAfter: (after) => active.firstInitializeAfter(after),
+      waitForToolsListSince: (since, count, timeoutMs) => active.waitForToolsListSince(since, count, timeoutMs),
+      baseline,
+      startedAt: active.startedAt,
       sleep,
+      now: Date.now,
       timeoutMs: aaoConfig.readinessTimeoutMs,
       marginMs: aaoConfig.readinessMarginMs,
     }),
