@@ -5,6 +5,7 @@ import {
   findRegisteredV2ServerUrl,
   type V2ClientExtension,
 } from "./v2/client.js";
+import { withAaoPromptGate } from "../aao/hooks.js";
 
 const PROBE_TIMEOUT_MS = 5000;
 
@@ -28,10 +29,12 @@ export const opencodeServerVersion: OpencodeServerVersion =
 function createClient() {
   const headers = authHeaders();
   if (opencodeServerVersion === "v2") {
-    return createV2OpencodeClient({
-      baseUrl: config.opencode.apiUrl,
-      ...(headers ? { headers } : {}),
-    });
+    return withAaoPromptGate(
+      createV2OpencodeClient({
+        baseUrl: config.opencode.apiUrl,
+        ...(headers ? { headers } : {}),
+      }),
+    );
   }
   return createOpencodeClient({
     baseUrl: config.opencode.apiUrl,

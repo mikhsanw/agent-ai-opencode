@@ -13,6 +13,7 @@ import {
   type EventHandlerDeps,
 } from "./handler-context.js";
 import { closeForegroundRun } from "./run-close.js";
+import { notifyAaoSessionIdle } from "../../../aao/hooks.js";
 
 const SESSION_RETRY_PREFIX = "🔁";
 
@@ -46,6 +47,7 @@ export function registerSessionLifecycleHandlers(deps: SessionLifecycleDeps): vo
   const { runtime, policy, summaryAggregator } = deps;
 
   summaryAggregator.setOnSessionIdle(async (sessionId, { interrupted }) => {
+    notifyAaoSessionIdle(sessionId, Boolean(interrupted));
     wakePromptHandover(sessionId);
     resetStreamThrottle(sessionId);
     await markAttachedSessionIdle(sessionId, deps);

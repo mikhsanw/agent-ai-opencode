@@ -22,6 +22,7 @@ import { flushLogger, getLogFilePath, initializeLogger, logger } from "../../uti
 import { safeBackgroundTask } from "../../utils/safe-background-task.js";
 import { getTelegramRetryAfterMs } from "../../utils/telegram-rate-limit-retry.js";
 import { createAppContainer } from "./app-container.js";
+import { startAao, stopAao } from "../../aao/runtime.js";
 
 const SHUTDOWN_TIMEOUT_MS = 5000;
 const SETTINGS_FLUSH_TIMEOUT_MS = 1000;
@@ -217,6 +218,7 @@ export async function startBotApp(): Promise<void> {
     directoryPath: runtimePaths.localCommandsDirPath,
     builtInCommands: BUILT_IN_COMMAND_NAMES,
   });
+  await startAao();
   const bot = createBot(container, localCommandRegistry);
   await scheduledTaskRuntime.initialize(
     bot,
@@ -243,6 +245,7 @@ export async function startBotApp(): Promise<void> {
     container.cleanupProcess(`app_shutdown_${signal.toLowerCase()}`);
     opencodeAutoRestartService.stop();
     scheduledTaskRuntime.shutdown();
+    stopAao();
     void healthServer.stop();
 
     shutdownTimeout = setTimeout(() => {
@@ -328,6 +331,7 @@ export async function startBotApp(): Promise<void> {
     container.cleanupProcess("app_shutdown_complete");
     opencodeAutoRestartService.stop();
     scheduledTaskRuntime.shutdown();
+    stopAao();
     await healthServer.stop();
     await clearManagedServiceState().catch((error) => {
       logger.warn("[App] Failed to clear managed service state", error);

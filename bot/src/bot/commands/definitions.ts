@@ -1,6 +1,7 @@
 import { config, type OpencodeServerVersion } from "../../config.js";
 import type { I18nKey } from "../../i18n/en.js";
 import { t } from "../../i18n/index.js";
+import { AAO_COMMAND_NAMES, getAaoCommandDefinitions } from "../../aao/commands.js";
 
 /**
  * Centralized bot commands definitions
@@ -53,10 +54,13 @@ const ACTIVE_COMMAND_DEFINITIONS = COMMAND_DEFINITIONS.filter(
 );
 
 export function getLocalizedBotCommands(): BotCommandDefinition[] {
-  return ACTIVE_COMMAND_DEFINITIONS.map(({ command, descriptionKey }) => ({
-    command,
-    description: t(descriptionKey),
-  }));
+  return [
+    ...ACTIVE_COMMAND_DEFINITIONS.map(({ command, descriptionKey }) => ({
+      command,
+      description: t(descriptionKey),
+    })),
+    ...getAaoCommandDefinitions(),
+  ];
 }
 
 export const BOT_COMMANDS: BotCommandDefinition[] = getLocalizedBotCommands();
@@ -64,4 +68,5 @@ export const BOT_COMMANDS: BotCommandDefinition[] = getLocalizedBotCommands();
 export const BUILT_IN_COMMAND_NAMES = [
   "start",
   ...ACTIVE_COMMAND_DEFINITIONS.map(({ command }) => command),
+  ...AAO_COMMAND_NAMES,
 ];

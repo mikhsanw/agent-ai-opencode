@@ -30,6 +30,7 @@ import {
 import { registerMessageRouter } from "./routers/message-router.js";
 import { createAttachPresentation } from "./services/attach-presentation.js";
 import { createTelegramBotOptions } from "./telegram-client-options.js";
+import { registerAaoTelegram } from "../aao/telegram.js";
 
 const TRANSIENT_RETRY_SAFE_TELEGRAM_METHODS = new Set([
   "editMessageReplyMarkup",
@@ -217,6 +218,7 @@ export function createBot(
   const guardDeps = { ...container, localCommandRegistry };
   bot.use((ctx, next) => interactionGuardMiddleware(ctx, next, guardDeps));
 
+  registerAaoTelegram(bot, config.telegram.allowedUserId);
   registerCommandRouter(bot, { container, localCommandRegistry });
   registerCallbackRouter(bot, { container });
   registerMessageRouter(bot, { container });
