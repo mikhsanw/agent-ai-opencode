@@ -1,0 +1,67 @@
+import { config, type OpencodeServerVersion } from "../../config.js";
+import type { I18nKey } from "../../i18n/en.js";
+import { t } from "../../i18n/index.js";
+
+/**
+ * Centralized bot commands definitions
+ * Used for both Telegram API setMyCommands and command handler registration
+ */
+
+export interface BotCommandDefinition {
+  command: string;
+  description: string;
+}
+
+interface BotCommandI18nDefinition {
+  command: string;
+  descriptionKey: I18nKey;
+  /** The command exists only when the bot runs against this OpenCode server version. */
+  serverVersion?: OpencodeServerVersion;
+}
+
+/**
+ * List of all bot commands
+ * Update this array when adding new commands
+ */
+const COMMAND_DEFINITIONS: BotCommandI18nDefinition[] = [
+  { command: "status", descriptionKey: "cmd.description.status" },
+  { command: "new", descriptionKey: "cmd.description.new" },
+  { command: "abort", descriptionKey: "cmd.description.stop" },
+  { command: "detach", descriptionKey: "cmd.description.detach" },
+  { command: "sessions", descriptionKey: "cmd.description.sessions" },
+  { command: "recent", descriptionKey: "cmd.description.recent" },
+  { command: "messages", descriptionKey: "cmd.description.messages" },
+  { command: "settings", descriptionKey: "cmd.description.settings" },
+  { command: "projects", descriptionKey: "cmd.description.projects" },
+  { command: "worktree", descriptionKey: "cmd.description.worktree" },
+  { command: "task", descriptionKey: "cmd.description.task" },
+  { command: "tasklist", descriptionKey: "cmd.description.tasklist" },
+  { command: "rename", descriptionKey: "cmd.description.rename" },
+  { command: "commands", descriptionKey: "cmd.description.commands" },
+  { command: "skills", descriptionKey: "cmd.description.skills" },
+  { command: "mcps", descriptionKey: "cmd.description.mcps" },
+  { command: "opencode_start", descriptionKey: "cmd.description.opencode_start" },
+  { command: "opencode_stop", descriptionKey: "cmd.description.opencode_stop" },
+  { command: "reload", descriptionKey: "cmd.description.reload", serverVersion: "v2" },
+  { command: "open", descriptionKey: "cmd.description.open" },
+  { command: "ls", descriptionKey: "cmd.description.ls" },
+  { command: "help", descriptionKey: "cmd.description.help" },
+];
+
+const ACTIVE_COMMAND_DEFINITIONS = COMMAND_DEFINITIONS.filter(
+  ({ serverVersion }) => !serverVersion || serverVersion === config.opencode.serverVersion,
+);
+
+export function getLocalizedBotCommands(): BotCommandDefinition[] {
+  return ACTIVE_COMMAND_DEFINITIONS.map(({ command, descriptionKey }) => ({
+    command,
+    description: t(descriptionKey),
+  }));
+}
+
+export const BOT_COMMANDS: BotCommandDefinition[] = getLocalizedBotCommands();
+
+export const BUILT_IN_COMMAND_NAMES = [
+  "start",
+  ...ACTIVE_COMMAND_DEFINITIONS.map(({ command }) => command),
+];
