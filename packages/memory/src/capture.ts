@@ -110,7 +110,11 @@ export async function captureFromSession(opts: {
   return result;
 }
 
-/** Klien minimal untuk OpenCode V2 server API (Basic auth). */
+/**
+ * Klien minimal untuk OpenCode V2 server API (Basic auth).
+ * Tanpa `directory`, direktori diambil dari sesi itu sendiri (`GET /api/session/{id}`),
+ * karena pemicu auto-capture (event idle) hanya membawa ID sesi.
+ */
 export function createOpencodeGenerateClient(opts: {
   baseUrl: string;
   password: string;
@@ -121,10 +125,21 @@ export function createOpencodeGenerateClient(opts: {
 }): GenerateClient {
   const f = opts.fetchImpl ?? fetch;
   const auth = "Basic " + Buffer.from(`${opts.username ?? "opencode"}:${opts.password}`).toString("base64");
+  const sessionDirectory = async (sessionId: string): Promise<string | undefined> => {
+    const res = await f(new URL(`/api/session/${encodeURIComponent(sessionId)}`, opts.baseUrl), {
+      headers: { authorization: auth },
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (!res.ok) throw new Error(`session HTTP ${res.status}`);
+    const body = (await res.json()) as { data?: { location?: { directory?: unknown } } };
+    const dir = body.data?.location?.directory;
+    return typeof dir === "string" ? dir : undefined;
+  };
   return {
     async generate(sessionId, prompt) {
       const url = new URL(`/api/session/${encodeURIComponent(sessionId)}/generate`, opts.baseUrl);
-      if (opts.directory) url.searchParams.set("directory", opts.directory);
+      const directory = opts.directory ?? (await sessionDirectory(sessionId));
+      if (directory) url.searchParams.set("directory", directory);
       const res = await f(url, {
         method: "POST",
         headers: { authorization: auth, "content-type": "application/json" },

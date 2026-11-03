@@ -1,0 +1,125 @@
+import { CommandContext, Context } from "grammy";
+import type { AppContainer } from "../../app/bootstrap/app-container.js";
+import { checkOpencodeHealth } from "../../opencode/server-health.js";
+import { getGitWorktreeContext } from "../../app/services/worktree-service.js";
+import { fetchSessionTitle, getCurrentSession } from "../../app/services/session-service.js";
+import { formatSessionTitle } from "../../app/formatters/session-title-formatter.js";
+import { getCurrentProject } from "../../app/stores/settings-store.js";
+import { fetchCurrentAgent } from "../../app/services/agent-selection-service.js";
+import { fetchCurrentModel } from "../../app/services/model-selection-service.js";
+import { getAgentDisplayName } from "../../app/types/agent.js";
+import { logger } from "../../utils/logger.js";
+import { isExpectedOpencodeUnavailableError } from "../../utils/opencode-error.js";
+import { t } from "../../i18n/index.js";
+import { sendBotText } from "../messages/telegram-text.js";
+import { getBotVersion } from "../../runtime/bot-version.js";
+
+export type StatusCommandDeps = Pick<AppContainer, "keyboardManager" | "pinnedMessageManager">;
+
+export async function statusCommand(ctx: CommandContext<Context>, deps: StatusCommandDeps) {
+  try {
+    const health = await checkOpencodeHealth();
+
+    if (!health.healthy) {
+      throw health.error || new Error("No data received from server");
+    }
+
+    const botVersion = await getBotVersion();
+    let message = `${t("status.header_running")}\n\n`;
+    message += `${t("status.line.bot_version", { version: botVersion })}\n`;
+    if (health.version) {
+      message += `${t("status.line.version", { version: health.version })}\n`;
+    }
+
+    // Add agent information
+    const currentAgent = await fetchCurrentAgent();
+    const agentDisplay = currentAgent
+      ? getAgentDisplayName(currentAgent)
+      : t("status.agent_not_set");
+    message += `\n${t("status.line.mode", { mode: agentDisplay })}\n`;
+
+    // Add model information
+    const currentModel = fetchCurrentModel();
+    const modelName = `${currentModel.providerID}/${currentModel.modelID}`;
+    const modelDisplay = currentModel.variant
+      ? `🧠 ${modelName} (${currentModel.variant})`
+      : `🧠 ${modelName}`;
+    message += `${t("status.line.model", { model: modelDisplay })}\n`;
+
+    const currentProject = getCurrentProject();
+    if (currentProject) {
+      let projectDisplay = currentProject.worktree;
+      let linkedWorktreePath: string | null = null;
+
+      try {
+        const worktreeContext = await getGitWorktreeContext(currentProject.worktree);
+        if (worktreeContext) {
+          projectDisplay = worktreeContext.branch
+            ? `${worktreeContext.mainProjectPath}: ${worktreeContext.branch}`
+            : worktreeContext.mainProjectPath;
+          linkedWorktreePath = worktreeContext.isLinkedWorktree
+            ? worktreeContext.activeWorktreePath
+            : null;
+        }
+      } catch (error) {
+        logger.debug("[Status] Could not resolve git worktree metadata", error);
+      }
+
+      message += `\n${t("status.project_selected", { project: projectDisplay })}\n`;
+      if (linkedWorktreePath) {
+        message += `${t("status.worktree_selected", { worktree: linkedWorktreePath })}\n`;
+      }
+    } else {
+      message += `\n${t("status.project_not_selected")}\n`;
+      message += t("status.project_hint");
+    }
+
+    const currentSession = getCurrentSession();
+    if (currentSession) {
+      const title = formatSessionTitle(await fetchSessionTitle(currentSession));
+      message += `\n${t("status.session_selected", { title })}\n`;
+    } else {
+      message += `\n${t("status.session_not_selected")}\n`;
+      message += t("status.session_hint");
+    }
+
+    if (ctx.chat) {
+      if (!deps.pinnedMessageManager.isInitialized()) {
+        deps.pinnedMessageManager.initialize(ctx.api, ctx.chat.id);
+      }
+      // Fetch context limit if not yet loaded (e.g. fresh bot start)
+      if (deps.pinnedMessageManager.getContextLimit() === 0) {
+        await deps.pinnedMessageManager.refreshContextLimit();
+      }
+      deps.keyboardManager.initialize(ctx.api, ctx.chat.id);
+    }
+    // A session change or restore still loading answers with its values, not the previous ones
+    await deps.pinnedMessageManager.waitForSessionValues();
+    // Sync current context (tokens used + limit) into keyboard state
+    const contextInfo = deps.pinnedMessageManager.getContextInfo();
+    if (contextInfo) {
+      deps.keyboardManager.updateContext(contextInfo.tokensUsed, contextInfo.tokensLimit);
+    }
+    const keyboard = deps.keyboardManager.getKeyboard();
+    if (ctx.chat) {
+      await sendBotText({
+        api: ctx.api,
+        chatId: ctx.chat.id,
+        text: message,
+        options: keyboard ? { reply_markup: keyboard } : {},
+      });
+    } else {
+      await ctx.reply(message, keyboard ? { reply_markup: keyboard } : {});
+    }
+  } catch (error) {
+    if (isExpectedOpencodeUnavailableError(error)) {
+      logger.warn("[Bot] OpenCode server unavailable; cannot report status");
+    } else {
+      logger.error("[Bot] Error checking server status:", error);
+    }
+    const botVersion = await getBotVersion();
+    await ctx.reply(
+      `${t("status.header_unavailable")}\n${t("status.line.bot_version", { version: botVersion })}\n\n${t("status.unavailable_hint")}`,
+    );
+  }
+}

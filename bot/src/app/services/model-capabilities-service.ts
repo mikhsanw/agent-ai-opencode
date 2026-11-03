@@ -1,0 +1,96 @@
+import { logger } from "../../utils/logger.js";
+import { readProvidersWhenListed } from "./model-selection-service.js";
+import type { Model } from "@opencode-ai/sdk/v2";
+
+interface ModelCapabilitiesCache {
+  [key: string]: Model["capabilities"];
+}
+
+const capabilitiesCache: ModelCapabilitiesCache = {};
+
+/**
+ * Get model capabilities from OpenCode API
+ * Capabilities of a listed model are cached in memory per model; an unlisted model is not,
+ * so the next file asks the server again.
+ */
+export async function getModelCapabilities(
+  providerID: string,
+  modelID: string,
+): Promise<Model["capabilities"] | null> {
+  const cacheKey = `${providerID}/${modelID}`;
+
+  if (capabilitiesCache[cacheKey] !== undefined) {
+    logger.debug(`[ModelCapabilities] Cache hit for ${cacheKey}`);
+    return capabilitiesCache[cacheKey];
+  }
+
+  try {
+    logger.debug(`[ModelCapabilities] Fetching capabilities for ${cacheKey}`);
+    const response = await readProvidersWhenListed(providerID);
+
+    if (response.error || !response.data) {
+      logger.error("[ModelCapabilities] API returned error:", response.error);
+      return null;
+    }
+
+    const providers = response.data.providers;
+
+    if (providers.every((p) => Object.keys(p.models).length === 0)) {
+      // A freshly started server lists no models for a moment; do not remember that as an answer.
+      logger.warn(`[ModelCapabilities] Providers list has no models; not caching ${cacheKey}`);
+      return null;
+    }
+
+    const provider = providers.find((p) => p.id === providerID);
+
+    if (!provider) {
+      logger.warn(`[ModelCapabilities] Provider ${providerID} not found`);
+      return null;
+    }
+
+    const model = provider.models[modelID];
+
+    if (!model) {
+      logger.warn(`[ModelCapabilities] Model ${cacheKey} not found in provider`);
+      return null;
+    }
+
+    logger.debug(`[ModelCapabilities] Found capabilities for ${cacheKey}`);
+    capabilitiesCache[cacheKey] = model.capabilities;
+    return model.capabilities;
+  } catch (error) {
+    logger.error("[ModelCapabilities] Failed to fetch providers:", error);
+    return null;
+  }
+}
+
+export function __resetModelCapabilitiesCacheForTests(): void {
+  for (const key of Object.keys(capabilitiesCache)) {
+    delete capabilitiesCache[key];
+  }
+}
+
+/**
+ * Check if model supports a specific input type
+ */
+export function supportsInput(
+  capabilities: Model["capabilities"] | null,
+  inputType: "image" | "pdf" | "audio" | "video",
+): boolean {
+  if (!capabilities) {
+    return false;
+  }
+
+  return capabilities.input[inputType] === true;
+}
+
+/**
+ * Check if model supports attachments in general
+ */
+export function supportsAttachment(capabilities: Model["capabilities"] | null): boolean {
+  if (!capabilities) {
+    return false;
+  }
+
+  return capabilities.attachment === true;
+}

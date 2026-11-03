@@ -101,9 +101,28 @@ describe("createOpencodeGenerateClient", () => {
     expect(JSON.parse(calls[0]!.init.body as string)).toEqual({ prompt: "halo" });
   });
 
+  it("tanpa directory, mengambil direktori dari sesi lebih dulu", async () => {
+    const urls: string[] = [];
+    const fetchImpl = (async (url: URL) => {
+      urls.push(String(url));
+      if (String(url).endsWith("/api/session/ses_y")) {
+        return new Response(JSON.stringify({ data: { id: "ses_y", location: { directory: "/srv/workspace/dry24" } } }));
+      }
+      return new Response(JSON.stringify({ data: { text: "{}" } }));
+    }) as unknown as typeof fetch;
+    const client = createOpencodeGenerateClient({ baseUrl: "http://127.0.0.1:49374", password: "pw", fetchImpl });
+    await client.generate("ses_y", "p");
+    expect(urls).toEqual([
+      "http://127.0.0.1:49374/api/session/ses_y",
+      "http://127.0.0.1:49374/api/session/ses_y/generate?directory=%2Fsrv%2Fworkspace%2Fdry24",
+    ]);
+  });
+
   it("melempar error untuk status non-2xx", async () => {
     const fetchImpl = (async () => new Response("no", { status: 401 })) as unknown as typeof fetch;
-    const client = createOpencodeGenerateClient({ baseUrl: "http://x", password: "bad", fetchImpl });
-    await expect(client.generate("s", "p")).rejects.toThrow("generate HTTP 401");
+    const withDir = createOpencodeGenerateClient({ baseUrl: "http://x", password: "bad", directory: "/w", fetchImpl });
+    await expect(withDir.generate("s", "p")).rejects.toThrow("generate HTTP 401");
+    const withoutDir = createOpencodeGenerateClient({ baseUrl: "http://x", password: "bad", fetchImpl });
+    await expect(withoutDir.generate("s", "p")).rejects.toThrow("session HTTP 401");
   });
 });

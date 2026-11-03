@@ -235,6 +235,13 @@ export class MemoryStore {
     return { status: "undone", entry };
   }
 
+  /** Perubahan sejak waktu tertentu (urut lama → baru), untuk digest harian. */
+  historySince(sinceMs: number): AuditEntry[] {
+    return (this.db.prepare("SELECT * FROM audit WHERE ts >= ? ORDER BY id").all(sinceMs) as Record<string, unknown>[]).map(
+      toAudit,
+    );
+  }
+
   history(limit = 20): AuditEntry[] {
     return (this.db.prepare("SELECT * FROM audit ORDER BY id DESC LIMIT ?").all(limit) as Record<string, unknown>[]).map(
       toAudit,
