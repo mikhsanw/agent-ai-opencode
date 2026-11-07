@@ -1,7 +1,7 @@
 # PRD — agent-ai-opencode v2
 
 Status: **v1.6, disetujui** (7 Nov 2026) · Pemilik: Muhammad Ikhsan Wibowo
-Menggantikan seluruh isi repo lama (V1). Kode V1 disimpan di branch `legacy` dan **tidak dipakai ulang** (keputusan pemilik: tidak ada bagian yang cocok).
+Menggantikan seluruh isi repo lama (V1). Kode V1 tetap ada di riwayat git (commit `9012c6e`; branch `legacy` dihapus 7 Nov atas keputusan pemilik) dan **tidak dipakai ulang** (keputusan pemilik: tidak ada bagian yang cocok).
 
 ---
 
@@ -112,7 +112,7 @@ Telegram ──► aao-bot (fork grinev, user OS aao-bot)
 
 ## 8. Repo lama dan kondisi VPS
 
-**Repo lama (`legacy`)**: tidak ada yang dibawa (keputusan pemilik, 23 Okt). Tidak di-port: preset izin, auto-share proyek, snapshot file/backup database, mode Docker, perintah `otb`. Satu temuan V1 tetap dicatat sebagai hal yang **wajib diuji ulang** di V2 karena menyangkut keamanan: plugin di `.opencode/plugins/` repo yang di-clone dieksekusi otomatis tanpa izin. V2 juga auto-discover direktori itu; perlu dicek apakah bisa dimatikan (dulu `OPENCODE_DISABLE_PROJECT_CONFIG`). Jika bisa, ini sekaligus menutup serangan shadowing skill proyek (K5).
+**Repo lama (V1, commit `9012c6e`)**: tidak ada yang dibawa (keputusan pemilik, 23 Okt). Tidak di-port: preset izin, auto-share proyek, snapshot file/backup database, mode Docker, perintah `otb`. Satu temuan V1 tetap dicatat sebagai hal yang **wajib diuji ulang** di V2 karena menyangkut keamanan: plugin di `.opencode/plugins/` repo yang di-clone dieksekusi otomatis tanpa izin. V2 juga auto-discover direktori itu; perlu dicek apakah bisa dimatikan (dulu `OPENCODE_DISABLE_PROJECT_CONFIG`). Jika bisa, ini sekaligus menutup serangan shadowing skill proyek (K5).
 
 **VPS bersama** (`ps`, 23 Okt; keputusan pemilik 24 Okt: agen tetap di VPS ini, K20): VPS ini juga menjalankan **freqtrade** (bot trading, ~534 MB, terbesar), OpenCode lama (~198 MB), PM2 (~48 MB), dan agen monitoring penyedia. RAM total 1,9 GiB, swap 1,3 GiB sudah terpakai.
 

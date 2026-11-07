@@ -2,7 +2,7 @@
 
 Agen coding [OpenCode V2](https://opencode.ai) yang dikendalikan lewat Telegram dan berjalan di VPS, dengan **memori jangka panjang** dan **skill hasil belajar** (terinspirasi Hermes Agent). OpenCode tetap menjadi agennya; repo ini menambahkan memori, approval skill lewat Telegram, dan sandbox dua user OS.
 
-> Setup lama (OpenCode V1) tersimpan di branch [`legacy`](../../tree/legacy) dan **tidak lagi dirawat**.
+> Setup lama (OpenCode V1) tidak lagi dirawat; kodenya tetap ada di riwayat git (commit [`9012c6e`](../../tree/9012c6e352d18d7e4dfa4682c94a44dbec89dfd9)).
 
 ## Status
 
