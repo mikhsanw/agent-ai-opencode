@@ -24,8 +24,11 @@ Rencana, keputusan, dan buktinya: [`docs/PRD.md`](docs/PRD.md).
 | `/memory` | Daftar memori, hapus per entri (🗑), batalkan perubahan terakhir |
 | `/undo` | Batalkan perubahan memori terakhir |
 | `/skills_pending` | Skill yang diusulkan agen: 👁 lihat penuh, ✅ aktifkan, ❌ tolak (beserta penanda risiko) |
+| `/settings` → **🛠 OpenCode** | 🔌 provider terhubung (hapus key dengan konfirmasi), ➕ tambah provider (OpenCode Zen, DeepSeek, OpenRouter, Anthropic, OpenAI, Google, Groq, atau cari 200+ provider lain) lalu kirim API key-nya, 🧠 ganti model, 🧩 skill hasil belajar (lihat, nonaktifkan, setujui), ℹ️ status (versi OpenCode, model, memori, skill) |
 | notifikasi | Muncul saat agen mengusulkan skill baru (tombolnya tetap bisa dipakai saat agen sibuk) |
 | digest harian | Ringkasan perubahan memori 24 jam terakhir (default jam 20.00 waktu server) |
+
+**API key lewat Telegram.** Setelah memilih provider di ➕, pesan berikutnya dianggap key: pesan itu langsung dihapus dari chat, diteruskan sekali ke OpenCode (yang menyimpannya di datanya sendiri, `/var/lib/aao-agent`), dan tidak pernah sampai ke agen, riwayat sesi, auto-capture, memori, maupun log bot. Bot tidak pernah membaca key kembali; daftar provider hanya menampilkan labelnya. Pesan tunggal yang terlihat seperti key/token (mis. `sk-…`) yang dikirim di luar menu juga dihapus dan tidak diteruskan ke agen. Catatan jujur: agen sendiri tetap bisa membaca key yang dipakai OpenCode (itu prasyarat agar OpenCode bisa memanggil provider), jadi pakai key dengan batas belanja.
 
 Semua perintah bawaan bot upstream tetap ada: `/open`, `/new`, `/sessions`, `/abort`, `/model`, dan lainnya (lihat [`bot/README.md`](bot/README.md)).
 
@@ -236,6 +239,8 @@ sudo userdel -r aao-bot; sudo userdel -r aao-agent   # -r ikut menghapus memori 
 | "OpenCode server is not available" | `systemctl status aao-agent`; password di `agent.env` dan `bot.env` harus sama |
 | `/memory` selalu kosong | `journalctl -u aao-bot \| grep AAO`; `AAO_MCP_TOKEN` harus sama dengan token di `opencode.json`; lalu `sudo systemctl restart aao-agent` |
 | `status=203/EXEC` pada aao-bot | `node` tidak ada di `/usr/bin` atau `/usr/local/bin` (lihat langkah 1) |
+| Pesan saya dihapus: "terlihat seperti API key" | Pesan satu kata tanpa spasi yang cocok dengan pola key/token tidak diteruskan ke agen. Tambahkan kata lain (mis. "cek commit …") bila itu memang bukan rahasia |
+| Model provider baru tidak muncul | `/settings` → 🛠 OpenCode → 🔌 Provider: jumlah model 0 berarti OpenCode belum mengenali key; hapus lalu tambah lagi |
 | Agen kehabisan RAM | `MemoryMax` di `aao-agent.service` (default 800M); naikkan jika VPS lega, lalu `daemon-reload` + restart |
 
 ### Yang sudah dan belum diuji
@@ -244,6 +249,7 @@ Diuji di Ubuntu 24.04 dengan user dan izin file sungguhan, lewat langkah 3–6 d
 - `/open` memilih proyek, prompt dari Telegram sampai ke agen, agen menyimpan memori lewat MCP, agen membaca `MEMORY.md`, dan balasan kembali ke Telegram.
 - User agen **tidak bisa** membaca `bot.env` maupun database memori, tidak bisa mengubah `MEMORY.md` atau config OpenCode, dan tidak bisa `sudo`.
 - Sintaks kedua unit systemd lolos `systemd-analyze verify`.
+- Menu `/settings` → 🛠 OpenCode (e2e bot dengan OpenCode 2.2.6): key DeepSeek ditambahkan dan pesannya dihapus, model DeepSeek muncul di pemilih model dan bisa dipilih, key dihapus lagi, skill dinonaktifkan; key tidak ditemukan di log bot level debug, permintaan ke model, `MEMORY.md`, file bot, maupun pesan keluar bot.
 
 Belum diuji: efek sandbox systemd yang sebenarnya (`ProtectHome`, `MemoryMax`, dan seterusnya; lingkungan uji tidak menjalankan systemd sebagai PID 1), Telegram asli, dan model Zen sungguhan. Itu bagian fase 5 di VPS Anda.
 

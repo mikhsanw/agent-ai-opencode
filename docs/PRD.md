@@ -1,6 +1,6 @@
 # PRD — agent-ai-opencode v2
 
-Status: **v1.5, disetujui** (24 Okt 2026) · Pemilik: Muhammad Ikhsan Wibowo
+Status: **v1.6, disetujui** (7 Nov 2026) · Pemilik: Muhammad Ikhsan Wibowo
 Menggantikan seluruh isi repo lama (V1). Kode V1 disimpan di branch `legacy` dan **tidak dipakai ulang** (keputusan pemilik: tidak ada bagian yang cocok).
 
 ---
@@ -63,6 +63,7 @@ Inspirasi fitur: Hermes Agent (memori yang dikurasi agen, skill yang tumbuh dari
 | K18 | npm workspaces (`packages/memory` + `bot`); lockfile root di-seed dari lockfile upstream; `better-sqlite3` 13.0.3; instalasi produksi `npm ci --omit=dev --ignore-scripts` | Satu salinan dependensi (RAM). 13.0.3 membawa binary prebuilt; npm 10 (bawaan Node 22) tetap menjalankan `node-gyp rebuild` (butuh compiler + unduhan header) kecuali `--ignore-scripts`. Diuji: npm 10 + `--ignore-scripts` memasang 281 paket, binary prebuilt termuat. Bonus keamanan: tidak ada install script pihak ketiga yang berjalan |
 | K19 | Password OpenCode tetap lewat env `OPENCODE_SERVER_PASSWORD` | Diuji: `opencode serve` V2 memakainya (auth 200) alih-alih password acak per start; dibutuhkan agar bot tetap tersambung setelah OpenCode restart |
 | K20 | Agen tetap di VPS yang sama dengan freqtrade; memori global (satu untuk semua proyek); tanpa mode "satu proyek per proses" | Keputusan pemilik (24 Okt). Agen hanya melihat `/srv/workspace`; seluruh `/home` disembunyikan sehingga freqtrade tidak terlihat tanpa perlu tahu path-nya |
+| K21 | Konfigurasi OpenCode digabung ke `/settings` (satu baris tombol di menu upstream). API key masuk lewat middleware yang berjalan tepat setelah auth, sebelum interaction guard, penggabung pesan, dan antrean prompt; key diteruskan sekali ke `POST /api/integration/{id}/connect/key`, pesannya dihapus, dan bot tidak pernah membaca key kembali (daftar provider dari `/api/integration`, yang hanya memuat label). Pesan tunggal yang cocok dengan pemindai rahasia memori juga diblok dari agen | Keputusan pemilik: "boleh, namun jangan simpan di memori". Diuji di 2.2.6: integrasi 239 entri; `connect/key` → 204; kredensial tersimpan di DB OpenCode milik user agen (berjalan walau config read-only); `DELETE /api/credential/{id}` → 204; cache model bot dibuang lewat `startModelCatalogWarmup`. E2E: key tidak muncul di log debug, permintaan model, snapshot, file bot, atau pesan keluar |
 
 ## 5. Arsitektur
 
@@ -103,6 +104,7 @@ Telegram ──► aao-bot (fork grinev, user OS aao-bot)
 
 1. **Paket memori** + unit test + e2e terhadap OpenCode V2 dengan mock model. ✅ (88 unit test; e2e 15 pemeriksaan, 10/10 run lulus; lihat `packages/memory/README.md`)
 2. **Integrasi bot** ✅: bot upstream v0.26.5 sebagai subtree; modul `bot/src/aao`; patch upstream 6 file sumber + `package.json` (+30/−8 baris). 39 unit test baru; suite bot 2.808 lulus (2.769 upstream + 39 baru; satu-satunya kegagalan = test IPv6 yang juga gagal tanpa perubahan); e2e bot 21 pemeriksaan, 5/5 run lulus; RSS 124–132 MB (S8 terpenuhi).
+   **2b. Menu konfigurasi OpenCode** ✅ (K21): `/settings` → 🛠 OpenCode berisi provider (daftar, tambah dengan key, hapus), pemilih model upstream, skill hasil belajar (aktif + menunggu; lihat, nonaktifkan, setujui, tolak), dan status. Patch upstream bertambah 2 file (`settings-menu.ts` +2 baris, `bot/index.ts` +5/−2 baris) dan 1 test upstream disesuaikan (baris tombol bertambah). 23 unit test baru; e2e bot 39 pemeriksaan, lulus. Laporan duplikat saat `/new`: tidak bisa direproduksi (satu `/new` = satu sesi, sama dengan dan tanpa memori); menunggu detail dari pemilik.
    *Urutan berikutnya: 4 → 3 → 5, supaya bot bisa dipakai di VPS lebih cepat.*
 3. **Recall sesi**: indexer FTS5 atas riwayat sesi (V2 Sessions API, cursor) + `/recall`.
 4. **Installer & sandbox** (berikutnya). Langkah antara ✅: instalasi manual di README (dua user OS, unit systemd di `deploy/systemd`, template config di `deploy/`); diuji di Ubuntu 24.04 dengan user dan izin file sungguhan + OpenCode 2.2.6 (alur Telegram → agen → memori lulus; user agen tidak bisa membaca token bot/database memori, tidak bisa mengubah snapshot/config/kode bot, tidak bisa `sudo`). Sisa fase 4: installer satu perintah yang menjalankan langkah yang sama, deteksi + penghapusan bot lama dengan konfirmasi, `doctor`, update otomatis OpenCode yang diuji dulu dengan rollback, uji efek sandbox systemd di VM dengan systemd sebagai PID 1.
@@ -132,6 +134,7 @@ Konsekuensi yang menjadi syarat v2 (ditulis baru, bukan warisan V1):
 | `generate` mengembalikan teks kosong bila model memaksa tool call | Anggap "tidak ada fakta"; dicatat di log |
 | RAM VPS tipis dan dipakai bersama freqtrade (bot trading) | `MemoryMax` + `OOMScoreAdjust` untuk agen, batas heap Node, matikan OpenCode V1; opsi terbaik tetap VPS terpisah untuk agen |
 | Agen yang disusupi membaca kunci exchange freqtrade | Dua user OS + `InaccessiblePaths`/`ProtectHome`; diuji di fase 4 |
+| Agen (atau prompt injection) membaca API key provider | Tidak bisa dicegah sepenuhnya: OpenCode, yang berjalan sebagai user agen, butuh key untuk memanggil provider, sehingga key ada di data/env user agen. Mitigasi: key dengan batas belanja, model gratis Zen tanpa key, hapus key lewat menu bila curiga; key tidak pernah lewat sesi agen atau memori (K21) |
 | Upstream bot terus berubah | Patch tipis di titik integrasi; subtree dengan remote `upstream` |
 
 ## 10. Pertanyaan terbuka
