@@ -70,10 +70,11 @@ export async function startFakeTelegram({ userId, botId = 1000, username = "aao_
         waiters.add(finish);
         return;
       }
-      const call = { method, params, at: Date.now() };
+      // The result is recorded so tests can press buttons on the exact message the bot sent.
+      const call = { method, params, at: Date.now(), result: respond(method, params) };
       calls.push(call);
       for (const listener of listeners) listener(call);
-      send(respond(method, params));
+      send(call.result);
     });
   });
 

@@ -1,0 +1,18 @@
+{
+  "update": "disable",
+  "share": "disabled",
+  "model": "opencode/big-pickle",
+  "instructions": ["/var/lib/aao-shared/MEMORY.md"],
+  "permissions": [
+    { "action": "skill", "resource": "*", "effect": "deny" }
+  ],
+  "mcp": {
+    "servers": {
+      "memory": {
+        "type": "remote",
+        "url": "http://127.0.0.1:18090/mcp",
+        "headers": { "Authorization": "Bearer SAMA_DENGAN_AAO_MCP_TOKEN" }
+      }
+    }
+  }
+}

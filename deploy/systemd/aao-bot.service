@@ -1,0 +1,43 @@
+# Telegram bot + long-term memory (MCP on 127.0.0.1). Holds the bot token and the memory
+# database; the agent user can read neither.
+[Unit]
+Description=agent-ai-opencode: Telegram bot and memory
+Documentation=https://github.com/mikhsanw/agent-ai-opencode
+After=network-online.target aao-agent.service
+Wants=network-online.target aao-agent.service
+
+[Service]
+Type=simple
+User=aao-bot
+Group=aao-bot
+EnvironmentFile=/etc/aao/bot.env
+Environment=HOME=/var/lib/aao-bot
+Environment=OPENCODE_TELEGRAM_HOME=/var/lib/aao-bot
+Environment=NODE_ENV=production
+WorkingDirectory=/var/lib/aao-bot
+# Heap caps keep the process near 125-145 MB (PRD K16); without them it grows to ~170 MB.
+ExecStart=/usr/bin/env node --max-old-space-size=128 --max-semi-space-size=2 /opt/aao/src/bot/dist/index.js
+Restart=on-failure
+RestartSec=5
+
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/aao-bot /var/lib/aao-shared
+ReadOnlyPaths=/srv/workspace
+PrivateTmp=yes
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictSUIDSGID=yes
+LockPersonality=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+MemoryMax=300M
+OOMScoreAdjust=300
+
+[Install]
+WantedBy=multi-user.target

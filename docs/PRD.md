@@ -105,7 +105,7 @@ Telegram ──► aao-bot (fork grinev, user OS aao-bot)
 2. **Integrasi bot** ✅: bot upstream v0.26.5 sebagai subtree; modul `bot/src/aao`; patch upstream 6 file sumber + `package.json` (+30/−8 baris). 39 unit test baru; suite bot 2.808 lulus (2.769 upstream + 39 baru; satu-satunya kegagalan = test IPv6 yang juga gagal tanpa perubahan); e2e bot 21 pemeriksaan, 5/5 run lulus; RSS 124–132 MB (S8 terpenuhi).
    *Urutan berikutnya: 4 → 3 → 5, supaya bot bisa dipakai di VPS lebih cepat.*
 3. **Recall sesi**: indexer FTS5 atas riwayat sesi (V2 Sessions API, cursor) + `/recall`.
-4. **Installer & sandbox** (berikutnya): ditulis baru untuk V2 (bukan port dari `legacy`): installer satu perintah, dua user OS dengan sandbox systemd, batas memori + heap (K16), `npm ci --omit=dev --ignore-scripts` (K18), password OpenCode tetap (K19), `doctor`, `update`, uji serangan.
+4. **Installer & sandbox** (berikutnya). Langkah antara ✅: instalasi manual di README (dua user OS, unit systemd di `deploy/systemd`, template config di `deploy/`); diuji di Ubuntu 24.04 dengan user dan izin file sungguhan + OpenCode 2.2.6 (alur Telegram → agen → memori lulus; user agen tidak bisa membaca token bot/database memori, tidak bisa mengubah snapshot/config/kode bot, tidak bisa `sudo`). Sisa fase 4: installer satu perintah yang menjalankan langkah yang sama, deteksi + penghapusan bot lama dengan konfirmasi, `doctor`, update otomatis OpenCode yang diuji dulu dengan rollback, uji efek sandbox systemd di VM dengan systemd sebagai PID 1.
 5. **Uji lapangan** di VPS: ulang `zen-memory-test` (S2), uji serangan (S5), ukur RAM (S8). Setelah lulus → PR keluar dari draft → merge → tag `v2.0.0`.
 
 ## 8. Repo lama dan kondisi VPS
