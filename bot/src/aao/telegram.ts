@@ -5,6 +5,11 @@ import type { AuditEntry, Skill } from "@aao/memory";
 import { logger } from "../utils/logger.js";
 import { at, type AaoI18nKey } from "./i18n.js";
 import { getAaoRuntime, type AaoRuntime } from "./runtime.js";
+import { createConfigMenu, createOpencodeConfigApi, type ConfigMenu } from "./config-menu.js";
+import type { AppContainer } from "../app/bootstrap/app-container.js";
+import { fetchCurrentModel, startModelCatalogWarmup } from "../app/services/model-selection-service.js";
+import { showModelSelectionMenu } from "../bot/menus/model-selection-menu.js";
+import { buildSettingsMenuView } from "../bot/menus/settings-menu.js";
 
 const MESSAGE_BUDGET = 3500;
 const SKILL_PREVIEW_CHARS = 1200;
@@ -137,13 +142,18 @@ export async function handleCallback(ctx: Context, runtime: AaoRuntime): Promise
 
   if (area === "sk") {
     const pending = runtime.service.skills.listPending().find((skill) => skill.id === arg);
-    if (!pending) {
-      await ctx.answerCallbackQuery({ text: at("skills.gone"), show_alert: true });
+    if (action === "view") {
+      const skill = pending ?? runtime.service.skills.getApproved(arg);
+      if (!skill) {
+        await ctx.answerCallbackQuery({ text: at("skills.gone"), show_alert: true });
+        return;
+      }
+      await ctx.answerCallbackQuery();
+      await sendLongText(ctx.api, chatId, `${skill.name} (${skill.id})\n\n${skill.body}`);
       return;
     }
-    if (action === "view") {
-      await ctx.answerCallbackQuery();
-      await sendLongText(ctx.api, chatId, `${pending.name} (${pending.id})\n\n${pending.body}`);
+    if (!pending) {
+      await ctx.answerCallbackQuery({ text: at("skills.gone"), show_alert: true });
       return;
     }
     const decided = action === "ok" ? runtime.service.skills.approve(arg, actor) : runtime.service.skills.reject(arg, actor);
@@ -193,8 +203,27 @@ export async function runDigestIfDue(runtime: AaoRuntime, api: Api, chatId: numb
   return true;
 }
 
-/** Registers /memory, /undo, /skills_pending and the aao: callbacks; wires notifications and the digest. */
-export function registerAaoTelegram(bot: Bot<Context>, chatId: number): void {
+/** The /settings → OpenCode menu wired to the real bot services. */
+export function createAaoConfigMenu(container: Pick<AppContainer, "interactionManager">): ConfigMenu {
+  return createConfigMenu({
+    interactionManager: container.interactionManager,
+    opencode: createOpencodeConfigApi(),
+    getRuntime: getAaoRuntime,
+    getCurrentModel: () => {
+      const model = fetchCurrentModel();
+      return { providerID: model.providerID, modelID: model.modelID };
+    },
+    refreshModelCatalog: startModelCatalogWarmup,
+    showModelMenu: (ctx) => showModelSelectionMenu(ctx, container),
+    buildSettingsView: buildSettingsMenuView,
+  });
+}
+
+/**
+ * Registers /memory, /undo, /skills_pending and the aao: callbacks; wires notifications and the
+ * digest. The config menu's text middleware is registered separately, right after auth.
+ */
+export function registerAaoTelegram(bot: Bot<Context>, chatId: number, configMenu: ConfigMenu): void {
   const withRuntime = (handler: (ctx: Context, runtime: AaoRuntime) => Promise<void>) => async (ctx: Context) => {
     const runtime = getAaoRuntime();
     if (!runtime) {
@@ -228,6 +257,13 @@ export function registerAaoTelegram(bot: Bot<Context>, chatId: number): void {
       for (const skill of pending) await sendView(ctx.api, chatId, buildSkillCard(skill, false));
     }),
   );
+  bot.callbackQuery(/^aao:cfg:/, async (ctx) => {
+    try {
+      await configMenu.handleCallback(ctx);
+    } catch (error) {
+      logger.error("[AAO] Config menu failed", error);
+    }
+  });
   bot.callbackQuery(/^aao:/, withRuntime(handleCallback));
 
   const runtime = getAaoRuntime();

@@ -3,7 +3,7 @@
 // commands and skill approval through the bot's own code paths.
 // Needs `opencode` (V2) on PATH and `npm run build`. Usage: node scripts/e2e-bot.mjs
 import { spawn, execFileSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync, readdirSync, statSync } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
@@ -144,7 +144,8 @@ async function main() {
       OPENCODE_MODEL_PROVIDER: "mock",
       OPENCODE_MODEL_ID: "echo",
       BOT_LOCALE: "id",
-      LOG_LEVEL: "info",
+      // Debug level so the key-leak check also covers the most verbose log output.
+      LOG_LEVEL: "debug",
       AAO_MCP_PORT: String(mcpPort),
       AAO_MCP_TOKEN: token,
       AAO_DIGEST_HOUR: "-1",
@@ -223,6 +224,118 @@ async function main() {
   check("restart OpenCode terdeteksi oleh gerbang (pid berubah)", /\[AAO\] OpenCode restart detected/.test(botLog), botLog.slice(-1500));
   check("prompt seketika setelah restart: memori tersimpan", savedAfterRestart, botLog.slice(-1500));
   check("prompt seketika setelah restart: tidak ada 'Unknown tool'", !unknownAfterRestart);
+
+  // 7. /settings → OpenCode: add a provider key, pick its model, remove the key, skills, leak checks
+  const KEY = `sk-e2e${randomBytes(16).toString("hex")}`;
+  const ocGet = async (path) => (await fetch(`http://127.0.0.1:${ocPort}${path}`, { headers: auth })).json();
+  const deepseekConnections = async () => ((await ocGet("/api/integration")).data ?? []).find((i) => i.id === "deepseek")?.connections ?? [];
+  const markupOf = (call) => JSON.stringify(call?.params.reply_markup ?? "");
+  const buttonsOfCall = (call) => (call?.params.reply_markup?.inline_keyboard ?? []).flat();
+  // /settings is refused while the agent is still busy with the previous prompt, so retry.
+  const openSettings = async () => {
+    for (let attempt = 0; attempt < 20; attempt++) {
+      const since = telegram.sendText("/settings");
+      const menu = await telegram
+        .waitFor((c) => c.method === "sendMessage" && markupOf(c).includes("aao:cfg:root"), { since, timeoutMs: 3000, label: "/settings" })
+        .catch(() => null);
+      if (menu) return menu.result.message_id;
+    }
+    return undefined;
+  };
+  const press = async (data, messageId, pattern, label) => {
+    const since = telegram.pressButton(data, messageId);
+    return telegram.waitFor((c) => c.method === "editMessageText" && pattern.test(c.params.text ?? ""), { since, label }).catch(() => null);
+  };
+
+  let menuId = await openSettings();
+  check("/settings memuat tombol 🛠 OpenCode", Boolean(menuId));
+  const cfgRoot = await press("aao:cfg:root", menuId, /Model aktif: mock\/echo/, "cfg root");
+  check("menu OpenCode menampilkan model aktif", Boolean(cfgRoot), botLog.slice(-800));
+  const add = await press("aao:cfg:add", menuId, /Tambah provider/, "cfg add");
+  check("daftar provider berisi DeepSeek dan OpenCode Zen", markupOf(add).includes("aao:cfg:addk:deepseek") && markupOf(add).includes("OpenCode Zen"), markupOf(add));
+  check("prompt key DeepSeek tampil", Boolean(await press("aao:cfg:addk:deepseek", menuId, /Kirim API key DeepSeek/, "key prompt")));
+  const promptsBeforeKey = mockRequests().length;
+  t = telegram.sendText(KEY);
+  const deleted = await telegram.waitFor((c) => c.method === "deleteMessage", { since: t, label: "deleteMessage" }).then(() => true, () => false);
+  const connectedView = await telegram.waitFor((c) => c.method === "editMessageText" && /DeepSeek terhubung: \d+ model/.test(c.params.text ?? ""), { since: t, label: "key saved" }).catch(() => null);
+  check("pesan berisi key langsung dihapus dari chat", deleted);
+  check("key tersimpan di OpenCode dan model DeepSeek muncul", Boolean(connectedView), botLog.slice(-1200));
+  const conns = await deepseekConnections();
+  check("OpenCode mencatat kredensial DeepSeek berlabel telegram", conns.some((c) => c.type === "credential" && c.label === "telegram"), JSON.stringify(conns));
+
+  // Pick a DeepSeek model through the upstream model picker opened from the menu.
+  t = telegram.pressButton("aao:cfg:model", menuId);
+  const modelMenu = await telegram.waitFor((c) => c.method === "sendMessage" && markupOf(c).includes("model:"), { since: t, label: "model menu" }).catch(() => null);
+  check("tombol 🧠 membuka pemilih model", Boolean(modelMenu));
+  const modelMenuId = modelMenu?.result.message_id;
+  let providerButton = null;
+  for (let page = 0; page < 5 && !providerButton; page++) {
+    const view = await press(`model:providers:${page}`, modelMenuId, /./, "providers page");
+    providerButton = buttonsOfCall(view).find((b) => /DeepSeek/.test(b.text));
+    if (!markupOf(view).includes(`model:providers:${page + 1}`)) break;
+  }
+  check("DeepSeek muncul di pemilih model", Boolean(providerButton));
+  if (providerButton) {
+    const models = await press(providerButton.callback_data, modelMenuId, /DeepSeek/, "deepseek models");
+    const flash = buttonsOfCall(models).find((b) => /deepseek-flash/.test(b.text));
+    if (flash) {
+      t = telegram.pressButton(flash.callback_data, modelMenuId);
+      await telegram.waitFor((c) => sentText(c, /Model diubah menjadi: deepseek \/ deepseek-flash/), { since: t, label: "model picked" }).catch(() => null);
+      // Upstream follows a model change with the variant picker; choose the default to close it.
+      const variants = await telegram.waitFor((c) => c.method === "sendMessage" && markupOf(c).includes("variant:default"), { since: t, label: "variant menu" }).catch(() => null);
+      if (variants) {
+        const since = telegram.pressButton("variant:default", variants.result.message_id);
+        await telegram.waitFor((c) => c.method === "answerCallbackQuery", { since, label: "variant chosen" }).catch(() => null);
+      }
+    }
+    const currentModel = () => JSON.parse(readFileSync(join(botHome, "settings.json"), "utf8")).currentModel ?? {};
+    const switched = await waitUntil(() => currentModel().providerID === "deepseek" && currentModel().modelID === "deepseek-flash", 5000);
+    check("model aktif berganti ke deepseek/deepseek-flash", switched, JSON.stringify(currentModel()));
+  }
+
+  // A key pasted without the prompt never reaches the agent.
+  const SECOND = `sk-e2e${randomBytes(16).toString("hex")}`;
+  t = telegram.sendText(SECOND);
+  const blocked = await telegram.waitFor((c) => c.method === "sendMessage" && /tidak dikirim ke agen/.test(c.params.text ?? ""), { since: t, label: "lone secret" }).then(() => true, () => false);
+  await sleep(1500);
+  check("key yang ditempel tanpa menu dihapus dan tidak dikirim ke agen", blocked && mockRequests().length === promptsBeforeKey, `${promptsBeforeKey} -> ${mockRequests().length}`);
+
+  // Remove the key again.
+  menuId = await openSettings();
+  await press("aao:cfg:root", menuId, /Model aktif/, "cfg root 2");
+  const providers = await press("aao:cfg:prov", menuId, /^🔌 Provider terhubung/, "providers");
+  const credId = conns.find((c) => c.type === "credential")?.id;
+  check("daftar provider menampilkan DeepSeek dengan tombol hapus", markupOf(providers).includes(`aao:cfg:pdel:${credId}`), providers?.params.text);
+  const confirmDelete = await press(`aao:cfg:pdel:${credId}`, menuId, /Hapus key DeepSeek/, "delete confirm");
+  check("hapus key meminta konfirmasi dan memperingatkan model aktif", /Model aktif deepseek\/deepseek-flash/.test(confirmDelete?.params.text ?? ""), confirmDelete?.params.text);
+  await press(`aao:cfg:pdelok:${credId}`, menuId, /^🔌 Provider terhubung/, "deleted");
+  check("key DeepSeek terhapus dari OpenCode", (await deepseekConnections()).length === 0);
+
+  // Skills: cek-log (approved in step 5) is listed and can be deactivated.
+  const skillsView = await press("aao:cfg:root", menuId, /Model aktif/, "cfg root 3").then(() => press("aao:cfg:sk", menuId, /Skill hasil belajar/, "skills"));
+  check("bagian Skill menampilkan cek-log yang aktif", /cek-log/.test(skillsView?.params.text ?? "") && markupOf(skillsView).includes("aao:cfg:skrv:cek-log"), skillsView?.params.text);
+  await press("aao:cfg:skrv:cek-log", menuId, /Nonaktifkan skill/, "revoke confirm");
+  await press("aao:cfg:skrvok:cek-log", menuId, /Skill hasil belajar/, "revoked");
+  check("skill dinonaktifkan dan hilang dari snapshot", await waitUntil(() => !snapshot().includes("`cek-log`"), 3000));
+  const status = await press("aao:cfg:root", menuId, /Model aktif/, "cfg root 4").then(() => press("aao:cfg:status", menuId, /OpenCode: /, "status"));
+  check("Status menampilkan versi OpenCode, memori, dan skill", (status?.params.text ?? "").includes(version.match(/\d+\.\d+\.\d+/)?.[0] ?? "?") && /entri/.test(status?.params.text ?? ""), status?.params.text);
+
+  // Leak check: the keys must not appear anywhere the bot or the agent writes (OpenCode's own
+  // credential store excepted, which is where the key belongs).
+  const filesUnder = (dir) =>
+    readdirSync(dir).flatMap((name) => {
+      const full = join(dir, name);
+      return statSync(full).isDirectory() ? filesUnder(full) : [full];
+    });
+  const leaks = [];
+  for (const secret of [KEY, SECOND]) {
+    if (botLog.includes(secret)) leaks.push("log bot (debug)");
+    if (readFileSync(mockLog, "utf8").includes(secret)) leaks.push("permintaan ke model (sesi agen)");
+    if (snapshot().includes(secret)) leaks.push("MEMORY.md");
+    if (JSON.stringify(telegram.calls.map((c) => c.params)).includes(secret)) leaks.push("pesan keluar bot");
+    for (const file of filesUnder(botHome)) if (readFileSync(file).includes(secret)) leaks.push(file);
+  }
+  check("key tidak bocor ke log, sesi, memori, atau pesan bot", leaks.length === 0, leaks.join(", "));
 
   // 7. Memory footprint (PRD S8)
   const botRss = rssMb(bot.pid);

@@ -176,7 +176,8 @@ describe("bot/commands/settings-command", () => {
     expect(opts.reply_markup.inline_keyboard[6][0].text).toBe(
       `${t("settings.prompt_queue.label")}: ${t("settings.value.off")}`,
     );
-    expect(opts.reply_markup.inline_keyboard[7][0].text).toBe(t("inline.button.close"));
+    expect(opts.reply_markup.inline_keyboard[7][0].callback_data).toBe("aao:cfg:root");
+    expect(opts.reply_markup.inline_keyboard[8][0].text).toBe(t("inline.button.close"));
   });
 
   it("shows thinking content setting when compact output is disabled", async () => {

@@ -15,6 +15,7 @@ import {
 } from "../../app/stores/settings-store.js";
 import { t } from "../../i18n/index.js";
 import { opencodeServerVersion } from "../../opencode/client.js";
+import { appendAaoSettingsRow } from "../../aao/settings-entry.js";
 
 export const SETTINGS_CALLBACK_PREFIX = "settings:";
 export const SETTINGS_COMPACT_OUTPUT_CALLBACK = `${SETTINGS_CALLBACK_PREFIX}compact_output`;
@@ -122,6 +123,7 @@ export function buildSettingsMenuView(): { text: string; keyboard: InlineKeyboar
       `${t("settings.prompt_queue.label")}: ${formatPromptQueueModeValue(promptQueueMode)}`,
       SETTINGS_PROMPT_QUEUE_CALLBACK,
     );
+  appendAaoSettingsRow(keyboard);
 
   return {
     text: t("settings.menu.title"),
